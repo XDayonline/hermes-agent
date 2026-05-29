@@ -456,7 +456,13 @@ def _parse_opencode_go_window(html: str, field: str) -> Optional[dict]:
     )
     for m in (pct_first.search(html), reset_first.search(html)):
         if m:
-            return {"usagePercent": max(0.0, float(m.group(1))), "resetInSec": max(0.0, float(m.group(2)))}
+            # pct_first: group(1)=usagePercent, group(2)=resetInSec
+            # reset_first: group(1)=resetInSec, group(2)=usagePercent
+            g1, g2 = float(m.group(1)), float(m.group(2))
+            if m.re == pct_first:
+                return {"usagePercent": max(0.0, g1), "resetInSec": max(0.0, g2)}
+            else:
+                return {"usagePercent": max(0.0, g2), "resetInSec": max(0.0, g1)}
     return None
 
 
