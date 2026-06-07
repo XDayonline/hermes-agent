@@ -201,3 +201,108 @@ def test_fetch_account_usage_openrouter_omits_quota_window_when_key_has_no_limit
     assert snapshot.windows == ()
     assert "Credits balance: $74.50" in snapshot.details
     assert "API key usage: $25.50 total • $1.25 today • $4.50 this week • $18.00 this month" in snapshot.details
+
+
+def test_fetch_account_usage_deepseek_with_balance(monkeypatch):
+    monkeypatch.setattr(
+        "agent.account_usage.os.getenv",
+        lambda key, default=None: "sk-fake-key" if key == "DEEPSEEK_API_KEY" else default,
+    )
+    monkeypatch.setattr(
+        "agent.account_usage.httpx.Client",
+        lambda timeout=10.0: _Client({
+            "is_available": True,
+            "balance_infos": [
+                {"currency": "USD", "total_balance": "4.23",
+                 "granted_balance": "0.00", "topped_up_balance": "4.23"},
+            ],
+        }),
+    )
+
+    snapshot = fetch_account_usage("deepseek")
+
+    assert snapshot is not None
+    assert snapshot.provider == "deepseek"
+    assert len(snapshot.details) == 1
+    assert "$4.23" in snapshot.details[0]
+
+
+def test_fetch_account_usage_deepseek_no_api_key(monkeypatch):
+    monkeypatch.setattr(
+        "agent.account_usage.os.getenv",
+        lambda key, default=None: default,
+    )
+    snapshot = fetch_account_usage("deepseek")
+    assert snapshot is None
+
+
+def test_fetch_account_usage_deepseek_multiple_currencies(monkeypatch):
+    monkeypatch.setattr(
+        "agent.account_usage.os.getenv",
+        lambda key, default=None: "sk-fake" if key == "DEEPSEEK_API_KEY" else default,
+    )
+    monkeypatch.setattr(
+        "agent.account_usage.httpx.Client",
+        lambda timeout=10.0: _Client({
+            "is_available": True,
+            "balance_infos": [
+                {"currency": "CNY", "total_balance": "30.00",
+                 "granted_balance": "10.00", "topped_up_balance": "20.00"},
+                {"currency": "USD", "total_balance": "1.50",
+                 "granted_balance": "0.00", "topped_up_balance": "1.50"},
+            ],
+        }),
+    )
+
+    snapshot = fetch_account_usage("deepseek")
+
+    assert snapshot is not None
+    assert len(snapshot.details) == 2
+    assert "¥30.00" in snapshot.details[0]
+    assert "$1.50" in snapshot.details[1]
+
+
+def test_fetch_account_usage_antigravity_with_quota(monkeypatch):
+    from agent.google_code_assist import QuotaBucket
+    from agent import antigravity_oauth, antigravity_code_assist
+    from unittest.mock import MagicMock
+
+    monkeypatch.setattr(
+        antigravity_oauth, "get_valid_access_token",
+        lambda: "fake-access-token",
+    )
+    monkeypatch.setattr(
+        antigravity_oauth, "load_credentials",
+        lambda: MagicMock(project_id="my-project"),
+    )
+    monkeypatch.setattr(
+        antigravity_code_assist, "retrieve_user_quota_antigravity",
+        lambda token, project_id="": [
+            QuotaBucket(model_id="gemini-pro-agent", token_type="token",
+                        remaining_fraction=0.75),
+            QuotaBucket(model_id="claude-sonnet-4-6", token_type="token",
+                        remaining_fraction=0.50),
+        ],
+    )
+
+    snapshot = fetch_account_usage("google-antigravity")
+
+    assert snapshot is not None
+    assert snapshot.provider == "google-antigravity"
+    assert any("gemini-pro-agent" in d for d in snapshot.details)
+    assert any("75%" in d for d in snapshot.details)
+    assert any("50%" in d for d in snapshot.details)
+
+
+def test_fetch_account_usage_antigravity_not_logged_in(monkeypatch):
+    from agent import antigravity_oauth
+
+    monkeypatch.setattr(
+        antigravity_oauth, "get_valid_access_token",
+        lambda: (_ for _ in ()).throw(Exception("not logged in")),
+    )
+
+    snapshot = fetch_account_usage("google-antigravity")
+
+    assert snapshot is not None
+    assert snapshot.unavailable_reason is not None
