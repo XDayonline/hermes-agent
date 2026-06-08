@@ -13,6 +13,20 @@ from hermes_cli.auth import _read_codex_tokens, resolve_codex_runtime_credential
 from hermes_cli.runtime_provider import resolve_runtime_provider
 
 
+def _hermes_home() -> str:
+    """Resolve HERMES_HOME from env or default."""
+    return os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+
+def _load_antigravity_oauth_token() -> Optional[Dict[str, Any]]:
+    """Read Antigravity OAuth token from disk."""
+    path = os.path.join(_hermes_home(), "auth", "antigravity_oauth.json")
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -372,7 +386,6 @@ def _fetch_deepseek_balance() -> Optional[AccountUsageSnapshot]:
 
 def _fetch_antigravity_quota() -> Optional[AccountUsageSnapshot]:
     try:
-        from agent import antigravity_oauth
         from agent.antigravity_code_assist import retrieve_user_quota_antigravity
     except ImportError as exc:
         return AccountUsageSnapshot(
@@ -380,16 +393,16 @@ def _fetch_antigravity_quota() -> Optional[AccountUsageSnapshot]:
             fetched_at=_utc_now(),
             unavailable_reason=f"Antigravity modules unavailable: {exc}",
         )
-    try:
-        access_token = antigravity_oauth.get_valid_access_token()
-    except Exception as exc:
+    token_data = _load_antigravity_oauth_token()
+    if not token_data or "access" not in token_data:
         return AccountUsageSnapshot(
             provider="google-antigravity", source="oauth_quota_api",
             fetched_at=_utc_now(),
-            unavailable_reason=f"Not logged in — run `agy auth login` ({exc})",
+            unavailable_reason="Not logged in — run `agy auth login`",
         )
-    creds = antigravity_oauth.load_credentials()
-    project_id = (creds.project_id if creds else "") or ""
+    access_token = token_data["access"]
+    project_id = token_data.get("project_id", "")
+
     try:
         buckets = retrieve_user_quota_antigravity(access_token, project_id=project_id)
     except Exception as exc:
@@ -443,13 +456,7 @@ def _parse_opencode_go_window(html: str, field: str) -> Optional[dict]:
     )
     for m in (pct_first.search(html), reset_first.search(html)):
         if m:
-            # pct_first: group(1)=usagePercent, group(2)=resetInSec
-            # reset_first: group(1)=resetInSec, group(2)=usagePercent
-            g1, g2 = float(m.group(1)), float(m.group(2))
-            if m.re == pct_first:
-                return {"usagePercent": max(0.0, g1), "resetInSec": max(0.0, g2)}
-            else:
-                return {"usagePercent": max(0.0, g2), "resetInSec": max(0.0, g1)}
+            return {"usagePercent": max(0.0, float(m.group(1))), "resetInSec": max(0.0, float(m.group(2)))}
     return None
 
 

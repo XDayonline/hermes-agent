@@ -136,9 +136,6 @@ SERVICE_PROVIDER_NAMES: Dict[str, str] = {
 DEFAULT_GEMINI_CLOUDCODE_BASE_URL = "cloudcode-pa://google"
 GEMINI_OAUTH_ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 60  # refresh 60s before expiry
 
-# Google Antigravity OAuth (Antigravity Code Assist backend)
-DEFAULT_ANTIGRAVITY_CLOUDCODE_BASE_URL = "antigravity-pa://google"
-
 # LM Studio's default no-auth mode still requires *some* non-empty bearer for
 # the API-key code paths (auxiliary_client, runtime resolver) to treat the
 # provider as configured. This sentinel is sent only to LM Studio, never to
@@ -208,12 +205,6 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         name="Google Gemini (OAuth)",
         auth_type="oauth_external",
         inference_base_url=DEFAULT_GEMINI_CLOUDCODE_BASE_URL,
-    ),
-    "google-antigravity": ProviderConfig(
-        id="google-antigravity",
-        name="Google Antigravity (OAuth)",
-        auth_type="oauth_external",
-        inference_base_url=DEFAULT_ANTIGRAVITY_CLOUDCODE_BASE_URL,
     ),
     "lmstudio": ProviderConfig(
         id="lmstudio",
@@ -1510,7 +1501,6 @@ def resolve_provider(
         "github-copilot-acp": "copilot-acp", "copilot-acp-agent": "copilot-acp",
         "opencode": "opencode-zen", "zen": "opencode-zen",
         "qwen-portal": "qwen-oauth", "qwen-cli": "qwen-oauth", "qwen-oauth": "qwen-oauth", "google-gemini-cli": "google-gemini-cli", "gemini-cli": "google-gemini-cli", "gemini-oauth": "google-gemini-cli",
-        "google-antigravity": "google-antigravity", "google-antigravity-oauth": "google-antigravity", "antigravity": "google-antigravity", "antigravity-oauth": "google-antigravity", "antigravity-cli": "google-antigravity", "agy": "google-antigravity", "agy-cli": "google-antigravity",
         "hf": "huggingface", "hugging-face": "huggingface", "huggingface-hub": "huggingface",
         "mimo": "xiaomi", "xiaomi-mimo": "xiaomi",
         "tencent": "tencent-tokenhub", "tokenhub": "tencent-tokenhub",
@@ -2047,25 +2037,6 @@ def _refresh_qwen_cli_tokens(tokens: Dict[str, Any], timeout_seconds: float = 20
     return refreshed
 
 
-def _mark_qwen_oauth_active(creds: Dict[str, Any]) -> None:
-    """Set active_provider to qwen-oauth in auth.json.
-
-    Qwen OAuth tokens live in the Qwen CLI credential file managed by
-    _save_qwen_cli_tokens / resolve_qwen_runtime_credentials. This function
-    only writes a minimal provider-state entry (base_url for display) and
-    sets active_provider so that get_active_provider() and
-    _model_section_has_credentials() detect the provider for the setup wizard
-    and status commands.
-    """
-    with _auth_store_lock():
-        auth_store = _load_auth_store()
-        state: Dict[str, Any] = {}
-        if creds.get("base_url"):
-            state["base_url"] = str(creds["base_url"])
-        _save_provider_state(auth_store, "qwen-oauth", state)
-        _save_auth_store(auth_store)
-
-
 def resolve_qwen_runtime_credentials(
     *,
     force_refresh: bool = False,
@@ -2129,24 +2100,6 @@ def get_qwen_auth_status() -> Dict[str, Any]:
 # Actual HTTP traffic goes to https://cloudcode-pa.googleapis.com/v1internal:*.
 # =============================================================================
 
-def _mark_google_gemini_cli_active(creds: Dict[str, Any]) -> None:
-    """Set active_provider to google-gemini-cli in auth.json.
-
-    The actual OAuth tokens live in the Google credential file managed by
-    agent.google_oauth. This function only writes a minimal provider-state
-    entry (email for display) and sets active_provider so that
-    get_active_provider() and _model_section_has_credentials() detect the
-    provider for the setup wizard and status commands.
-    """
-    with _auth_store_lock():
-        auth_store = _load_auth_store()
-        state: Dict[str, Any] = {}
-        if creds.get("email"):
-            state["email"] = str(creds["email"])
-        _save_provider_state(auth_store, "google-gemini-cli", state)
-        _save_auth_store(auth_store)
-
-
 def resolve_gemini_oauth_runtime_credentials(
     *,
     force_refresh: bool = False,
@@ -2207,72 +2160,6 @@ def get_gemini_oauth_auth_status() -> Dict[str, Any]:
         "logged_in": True,
         "auth_file": str(auth_path),
         "source": "google-oauth",
-        "api_key": creds.access_token,
-        "expires_at_ms": creds.expires_ms,
-        "email": creds.email,
-        "project_id": creds.project_id,
-    }
-
-
-def resolve_antigravity_oauth_runtime_credentials(
-    *,
-    force_refresh: bool = False,
-) -> Dict[str, Any]:
-    """Resolve runtime OAuth creds for google-antigravity."""
-    try:
-        from agent.antigravity_oauth import (
-            AntigravityOAuthError,
-            _credentials_path,
-            get_valid_access_token,
-            load_credentials,
-        )
-    except ImportError as exc:
-        raise AuthError(
-            f"agent.antigravity_oauth is not importable: {exc}",
-            provider="google-antigravity",
-            code="antigravity_oauth_module_missing",
-        ) from exc
-
-    try:
-        access_token = get_valid_access_token(force_refresh=force_refresh)
-    except AntigravityOAuthError as exc:
-        raise AuthError(
-            str(exc),
-            provider="google-antigravity",
-            code=exc.code,
-        ) from exc
-
-    creds = load_credentials()
-    return {
-        "provider": "google-antigravity",
-        "base_url": DEFAULT_ANTIGRAVITY_CLOUDCODE_BASE_URL,
-        "api_key": access_token,
-        "source": "antigravity-oauth",
-        "expires_at_ms": (creds.expires_ms if creds else None),
-        "auth_file": str(_credentials_path()),
-        "email": (creds.email if creds else "") or "",
-        "project_id": (creds.project_id if creds else "") or "",
-    }
-
-
-def get_antigravity_oauth_auth_status() -> Dict[str, Any]:
-    """Return a status dict for `hermes auth list` / `hermes status`."""
-    try:
-        from agent.antigravity_oauth import _credentials_path, load_credentials
-    except ImportError:
-        return {"logged_in": False, "error": "agent.antigravity_oauth unavailable"}
-    auth_path = _credentials_path()
-    creds = load_credentials()
-    if creds is None or not creds.access_token:
-        return {
-            "logged_in": False,
-            "auth_file": str(auth_path),
-            "error": "not logged in",
-        }
-    return {
-        "logged_in": True,
-        "auth_file": str(auth_path),
-        "source": "antigravity-oauth",
         "api_key": creds.access_token,
         "expires_at_ms": creds.expires_ms,
         "email": creds.email,
@@ -3483,7 +3370,7 @@ def _sync_codex_pool_entries(
         entry["last_error_reset_at"] = None
 
 
-def _save_codex_tokens(tokens: Dict[str, str], last_refresh: str = None, label: str = None) -> None:
+def _save_codex_tokens(tokens: Dict[str, str], last_refresh: str = None) -> None:
     """Save Codex OAuth tokens to Hermes auth store (~/.hermes/auth.json)."""
     if last_refresh is None:
         last_refresh = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -3493,8 +3380,6 @@ def _save_codex_tokens(tokens: Dict[str, str], last_refresh: str = None, label: 
         state["tokens"] = tokens
         state["last_refresh"] = last_refresh
         state["auth_mode"] = "chatgpt"
-        if label and str(label).strip():
-            state["label"] = str(label).strip()
         _save_provider_state(auth_store, "openai-codex", state)
         _sync_codex_pool_entries(auth_store, tokens, last_refresh)
         _save_auth_store(auth_store)
@@ -5832,8 +5717,6 @@ def get_auth_status(provider_id: Optional[str] = None) -> Dict[str, Any]:
         return get_qwen_auth_status()
     if target == "google-gemini-cli":
         return get_gemini_oauth_auth_status()
-    if target == "google-antigravity":
-        return get_antigravity_oauth_auth_status()
     if target == "minimax-oauth":
         return get_minimax_oauth_auth_status()
     if target == "copilot-acp":
@@ -6243,57 +6126,55 @@ def _prompt_model_selection(
     _DIM = "\033[2m"
     _RESET = "\033[0m"
 
-    # Try arrow-key menu first, fall back to number input.
-    # Uses the shared curses radiolist (ESC/arrow-key handling that works
-    # across terminals, incl. those that emit raw escape sequences) instead
-    # of simple_term_menu, which conflicts with /dev/tty and left ESC/arrow
-    # keys unreliable in the setup model picker.
+    # Try arrow-key menu first, fall back to number input
     try:
-        from hermes_cli.curses_ui import curses_radiolist
+        from simple_term_menu import TerminalMenu
 
-        choices = [_label(mid) for mid in ordered]
-        choices.append("Enter custom model name")
-        choices.append("Skip (keep current)")
+        choices = [f"  {_label(mid)}" for mid in ordered]
+        choices.append("  Enter custom model name")
+        choices.append("  Skip (keep current)")
 
         _upgrade_url = (portal_url or DEFAULT_NOUS_PORTAL_URL).rstrip("/")
         unavailable_footer = unavailable_message.strip()
         if not unavailable_footer and _unavailable:
             unavailable_footer = f"Upgrade at {_upgrade_url} for paid models"
 
-        # The pricing column header (and any unavailable-models block) is shown
-        # as a multi-line description above the list so it survives the curses
-        # screen clear. menu_title already embeds the aligned price header.
-        desc_lines: list[str] = []
-        if has_pricing:
-            # menu_title is "Select default model:\n<pad><header>  /Mtok"
-            # Keep only the header portion for the description.
-            header_part = menu_title.split("\n", 1)
-            if len(header_part) > 1:
-                desc_lines.extend(header_part[1].splitlines())
+        # Print the unavailable block BEFORE the menu via regular print().
+        # simple_term_menu pads title lines to terminal width (causes wrapping),
+        # so we keep the title minimal and use stdout for the static block.
+        # clear_screen=False means our printed output stays visible above.
         if _unavailable:
+            print(menu_title)
+            print()
             for mid in _unavailable:
-                desc_lines.append(f"   {_label(mid)}")
-            desc_lines.append(f"  ── {unavailable_footer} ──")
-        description = "\n".join(desc_lines) if desc_lines else None
+                print(f"{_DIM}     {_label(mid)}{_RESET}")
+            print()
+            print(f"{_DIM}  ── {unavailable_footer} ──{_RESET}")
+            print()
+            effective_title = "Available free models:"
+        else:
+            effective_title = menu_title
 
-        idx = curses_radiolist(
-            "Select default model:",
+        menu = TerminalMenu(
             choices,
-            selected=default_idx,
-            cancel_returns=-1,
-            description=description,
-            searchable=True,
+            cursor_index=default_idx,
+            menu_cursor="-> ",
+            menu_cursor_style=("fg_green", "bold"),
+            menu_highlight_style=("fg_green",),
+            cycle_cursor=True,
+            clear_screen=False,
+            title=effective_title,
         )
-        if idx < 0:
+        idx = menu.show()
+        from hermes_cli.curses_ui import flush_stdin
+        flush_stdin()
+        if idx is None:
             return None
         print()
         if idx < len(ordered):
             return ordered[idx]
         elif idx == len(ordered):
-            try:
-                custom = input("Enter model name: ").strip()
-            except (EOFError, KeyboardInterrupt):
-                return None
+            custom = input("Enter model name: ").strip()
             return custom if custom else None
         return None
     except (ImportError, NotImplementedError, OSError, subprocess.SubprocessError):

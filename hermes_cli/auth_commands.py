@@ -33,7 +33,7 @@ from hermes_cli.secret_prompt import masked_secret_prompt
 
 
 # Providers that support OAuth login in addition to API keys.
-_OAUTH_CAPABLE_PROVIDERS = {"anthropic", "nous", "openai-codex", "xai-oauth", "qwen-oauth", "google-gemini-cli", "google-antigravity", "minimax-oauth"}
+_OAUTH_CAPABLE_PROVIDERS = {"anthropic", "nous", "openai-codex", "xai-oauth", "qwen-oauth", "google-gemini-cli", "minimax-oauth"}
 
 
 def _get_custom_provider_names() -> list:
@@ -307,20 +307,28 @@ def auth_add_command(args) -> None:
         return
 
     if provider == "openai-codex":
+        # Clear any existing suppression marker so a re-link after `hermes auth
+        # remove openai-codex` works without the new tokens being skipped.
+        auth_mod.unsuppress_credential_source(provider, "device_code")
         creds = auth_mod._codex_device_code_login()
         label = (getattr(args, "label", None) or "").strip() or label_from_token(
             creds["tokens"]["access_token"],
             _oauth_default_label(provider, len(pool.entries()) + 1),
         )
-        auth_mod._save_codex_tokens(
-            creds["tokens"],
-            last_refresh=creds.get("last_refresh"),
+        entry = PooledCredential(
+            provider=provider,
+            id=uuid.uuid4().hex[:6],
             label=label,
+            auth_type=AUTH_TYPE_OAUTH,
+            priority=0,
+            source=f"{SOURCE_MANUAL}:device_code",
+            access_token=creds["tokens"]["access_token"],
+            refresh_token=creds["tokens"].get("refresh_token"),
+            base_url=creds.get("base_url"),
+            last_refresh=creds.get("last_refresh"),
         )
-        pool = load_pool(provider)
-        entry = next((item for item in pool.entries() if item.source == "device_code"), None)
-        shown_label = entry.label if entry is not None else label
-        print(f'Saved {provider} OAuth device-code credentials: "{shown_label}"')
+        pool.add_entry(entry)
+        print(f'Added {provider} OAuth credential #{len(pool.entries())}: "{entry.label}"')
         return
 
     if provider == "xai-oauth":
@@ -329,25 +337,30 @@ def auth_add_command(args) -> None:
             open_browser=not getattr(args, "no_browser", False),
             manual_paste=bool(getattr(args, "manual_paste", False)),
         )
-        auth_mod._save_xai_oauth_tokens(
-            creds["tokens"],
-            discovery=creds.get("discovery"),
-            redirect_uri=creds.get("redirect_uri", ""),
+        label = (getattr(args, "label", None) or "").strip() or label_from_token(
+            creds["tokens"]["access_token"],
+            _oauth_default_label(provider, len(pool.entries()) + 1),
+        )
+        entry = PooledCredential(
+            provider=provider,
+            id=uuid.uuid4().hex[:6],
+            label=label,
+            auth_type=AUTH_TYPE_OAUTH,
+            priority=0,
+            source=f"{SOURCE_MANUAL}:xai_pkce",
+            access_token=creds["tokens"]["access_token"],
+            refresh_token=creds["tokens"].get("refresh_token"),
+            base_url=creds.get("base_url"),
             last_refresh=creds.get("last_refresh"),
         )
-        pool = load_pool(provider)
-        entry = next((e for e in pool.entries() if getattr(e, "source", "") == "loopback_pkce"), None)
-        shown_label = entry.label if entry is not None else label_from_token(
-            creds["tokens"]["access_token"], _oauth_default_label(provider, 1)
-        )
-        print(f'Saved {provider} OAuth credentials: "{shown_label}"')
+        pool.add_entry(entry)
+        print(f'Added {provider} OAuth credential #{len(pool.entries())}: "{entry.label}"')
         return
 
     if provider == "google-gemini-cli":
         from agent.google_oauth import run_gemini_oauth_login_pure
 
         creds = run_gemini_oauth_login_pure()
-        auth_mod._mark_google_gemini_cli_active(creds)
         label = (getattr(args, "label", None) or "").strip() or (
             creds.get("email") or _oauth_default_label(provider, len(pool.entries()) + 1)
         )
@@ -365,30 +378,8 @@ def auth_add_command(args) -> None:
         print(f'Added {provider} OAuth credential #{len(pool.entries())}: "{entry.label}"')
         return
 
-    if provider == "google-antigravity":
-        from agent.antigravity_oauth import run_antigravity_oauth_login_pure
-
-        creds = run_antigravity_oauth_login_pure()
-        label = (getattr(args, "label", None) or "").strip() or (
-            creds.get("email") or _oauth_default_label(provider, len(pool.entries()) + 1)
-        )
-        entry = PooledCredential(
-            provider=provider,
-            id=uuid.uuid4().hex[:6],
-            label=label,
-            auth_type=AUTH_TYPE_OAUTH,
-            priority=0,
-            source=f"{SOURCE_MANUAL}:antigravity_pkce",
-            access_token=creds["access_token"],
-            refresh_token=creds.get("refresh_token"),
-        )
-        pool.add_entry(entry)
-        print(f'Added {provider} OAuth credential #{len(pool.entries())}: "{entry.label}"')
-        return
-
     if provider == "qwen-oauth":
         creds = auth_mod.resolve_qwen_runtime_credentials(refresh_if_expiring=False)
-        auth_mod._mark_qwen_oauth_active(creds)
         label = (getattr(args, "label", None) or "").strip() or label_from_token(
             creds["api_key"],
             _oauth_default_label(provider, len(pool.entries()) + 1),

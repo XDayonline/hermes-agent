@@ -264,16 +264,11 @@ def test_fetch_account_usage_deepseek_multiple_currencies(monkeypatch):
 
 def test_fetch_account_usage_antigravity_with_quota(monkeypatch):
     from agent.google_code_assist import QuotaBucket
-    from agent import antigravity_oauth, antigravity_code_assist
-    from unittest.mock import MagicMock
+    from agent import antigravity_code_assist
 
     monkeypatch.setattr(
-        antigravity_oauth, "get_valid_access_token",
-        lambda: "fake-access-token",
-    )
-    monkeypatch.setattr(
-        antigravity_oauth, "load_credentials",
-        lambda: MagicMock(project_id="my-project"),
+        "agent.account_usage._load_antigravity_oauth_token",
+        lambda: {"access": "fake-access-token", "project_id": "my-project"},
     )
     monkeypatch.setattr(
         antigravity_code_assist, "retrieve_user_quota_antigravity",
@@ -295,11 +290,9 @@ def test_fetch_account_usage_antigravity_with_quota(monkeypatch):
 
 
 def test_fetch_account_usage_antigravity_not_logged_in(monkeypatch):
-    from agent import antigravity_oauth
-
     monkeypatch.setattr(
-        antigravity_oauth, "get_valid_access_token",
-        lambda: (_ for _ in ()).throw(Exception("not logged in")),
+        "agent.account_usage._load_antigravity_oauth_token",
+        lambda: None,
     )
 
     snapshot = fetch_account_usage("google-antigravity")

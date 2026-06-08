@@ -25,7 +25,6 @@ from hermes_cli.auth import (
     resolve_xai_oauth_runtime_credentials,
     resolve_qwen_runtime_credentials,
     resolve_gemini_oauth_runtime_credentials,
-    resolve_antigravity_oauth_runtime_credentials,
     resolve_api_key_provider_credentials,
     resolve_external_process_provider_credentials,
     has_usable_secret,
@@ -319,9 +318,6 @@ def _resolve_runtime_from_pool_entry(
     elif provider == "google-gemini-cli":
         api_mode = "chat_completions"
         base_url = base_url or "cloudcode-pa://google"
-    elif provider == "google-antigravity":
-        api_mode = "chat_completions"
-        base_url = base_url or "antigravity-pa://google"
     elif provider == "minimax-oauth":
         # MiniMax OAuth tokens are valid only against the Anthropic Messages
         # compatible endpoint. Do not honor stale model.api_mode values from a
@@ -478,21 +474,6 @@ def _try_resolve_from_custom_pool(
         return None
 
 
-def _lift_max_output_tokens(entry: Dict[str, Any], result: Dict[str, Any]) -> None:
-    """Propagate a per-provider output cap onto the resolved runtime dict.
-
-    Accepts ``max_output_tokens`` or ``max_tokens`` on a ``custom_providers``
-    entry so a provider block can pin its own output limit. Gateway and CLI
-    map this onto ``AIAgent.max_tokens`` only when the top-level
-    ``model.max_tokens`` isn't set, so the documented global key still wins.
-    """
-    for _k in ("max_output_tokens", "max_tokens"):
-        _v = entry.get(_k)
-        if isinstance(_v, int) and _v > 0:
-            result["max_output_tokens"] = _v
-            return
-
-
 def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, Any]]:
     requested_norm = _normalize_custom_provider_name(requested_provider or "")
     if not requested_norm or requested_norm == "custom":
@@ -560,7 +541,6 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
                     api_mode = _parse_api_mode(entry.get("api_mode") or entry.get("transport"))
                     if api_mode:
                         result["api_mode"] = api_mode
-                    _lift_max_output_tokens(entry, result)
                     return result
             # Also check the 'name' field if present
             display_name = entry.get("name", "")
@@ -582,7 +562,6 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
                         api_mode = _parse_api_mode(entry.get("api_mode") or entry.get("transport"))
                         if api_mode:
                             result["api_mode"] = api_mode
-                        _lift_max_output_tokens(entry, result)
                         return result
 
     # Fall back to custom_providers: list (legacy format)
@@ -632,7 +611,6 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
         model_name = str(entry.get("model", "") or "").strip()
         if model_name:
             result["model"] = model_name
-        _lift_max_output_tokens(entry, result)
         return result
 
     return None
@@ -721,8 +699,6 @@ def _resolve_named_custom_runtime(
         model_name = custom_provider.get("model")
         if model_name:
             pool_result["model"] = model_name
-        if isinstance(custom_provider.get("max_output_tokens"), int):
-            pool_result["max_output_tokens"] = custom_provider["max_output_tokens"]
         request_overrides = _custom_provider_request_overrides(custom_provider)
         if request_overrides:
             pool_result["request_overrides"] = {
@@ -760,8 +736,6 @@ def _resolve_named_custom_runtime(
     # provider name differs from the actual model string the API expects.
     if custom_provider.get("model"):
         result["model"] = custom_provider["model"]
-    if isinstance(custom_provider.get("max_output_tokens"), int):
-        result["max_output_tokens"] = custom_provider["max_output_tokens"]
     request_overrides = _custom_provider_request_overrides(custom_provider)
     if request_overrides:
         result["request_overrides"] = request_overrides
@@ -1476,26 +1450,6 @@ def resolve_runtime_provider(
             if requested_provider != "auto":
                 raise
             logger.info("Google Gemini OAuth credentials failed; "
-                        "falling through to next provider.")
-
-    if provider == "google-antigravity":
-        try:
-            creds = resolve_antigravity_oauth_runtime_credentials()
-            return {
-                "provider": "google-antigravity",
-                "api_mode": "chat_completions",
-                "base_url": creds.get("base_url", ""),
-                "api_key": creds.get("api_key", ""),
-                "source": creds.get("source", "antigravity-oauth"),
-                "expires_at_ms": creds.get("expires_at_ms"),
-                "email": creds.get("email", ""),
-                "project_id": creds.get("project_id", ""),
-                "requested_provider": requested_provider,
-            }
-        except AuthError:
-            if requested_provider != "auto":
-                raise
-            logger.info("Google Antigravity OAuth credentials failed; "
                         "falling through to next provider.")
 
     if provider == "copilot-acp":

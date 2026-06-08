@@ -470,6 +470,17 @@ class TelegramAdapter(BasePlatformAdapter):
         )
         # Interactive model picker state per chat
         self._model_picker_state: Dict[str, dict] = {}
+        # Interactive session picker state per chat (for /resume and /sessions).
+        # Shape: {
+        #   "sessions":     list[dict],   # full result set (or filtered during search)
+        #   "page":         int,          # 0-indexed current page
+        #   "query":        str | None,   # active search filter
+        #   "awaiting_query": bool,       # True after user tapped 🔍; next text = query
+        #   "started_at":   float,        # epoch seconds; TTL eviction at 5 min
+        #   "on_session_selected": callable,  # async (chat_id, session_id) -> str
+        #   "metadata":     dict | None,
+        # }
+        self._session_picker_state: Dict[str, dict] = {}
         # Approval button state: message_id → session_key
         self._approval_state: Dict[int, str] = {}
         # Slash-confirm button state: confirm_id → session_key (for /reload-mcp
@@ -2919,6 +2930,374 @@ class TelegramAdapter(BasePlatformAdapter):
             logger.warning("[%s] send_model_picker failed: %s", self.name, e)
             return SendResult(success=False, error=str(e))
 
+    # ------------------------------------------------------------------
+    # Session picker (/resume, /sessions) — paginated inline keyboard
+    # ------------------------------------------------------------------
+
+    _SESSION_PICKER_PAGE_SIZE = 8
+    _SESSION_PICKER_TTL_SECONDS = 300  # 5 min — evict stale picker state
+
+    def _build_sessions_keyboard(
+        self, sessions: list, page: int, query: "Optional[str]" = None
+    ):
+        """Build the paginated session picker markup.
+
+        Returns (markup, header_text). Sessions are 1 button per row (titles
+        can be long). Bottom row has pagination + search + close.
+        """
+        page_size = self._SESSION_PICKER_PAGE_SIZE
+        total = len(sessions)
+        total_pages = max(1, (total + page_size - 1) // page_size)
+        page = max(0, min(page, total_pages - 1))
+
+        start = page * page_size
+        end = min(start + page_size, total)
+        page_sessions = sessions[start:end]
+
+        buttons = []
+        for i, s in enumerate(page_sessions):
+            abs_idx = start + i
+            title = (s.get("title") or "(untitled)").strip()
+            # Truncate to fit Telegram's 64-byte callback budget and label width.
+            if len(title) > 48:
+                title = title[:45] + "…"
+            preview = (s.get("preview") or "").strip().replace("\n", " ")
+            if len(preview) > 30:
+                preview = preview[:27] + "…"
+            label = f"{abs_idx + 1}. {title}"
+            if preview:
+                label = f"{label}\n    {preview}"
+            buttons.append(
+                InlineKeyboardButton(label, callback_data=f"sr:{abs_idx}")
+            )
+        # One button per row — long titles + previews won't fit two-up.
+        rows = [[b] for b in buttons]
+
+        # Navigation row
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("« Prev", callback_data=f"sg:{page - 1}"))
+        nav.append(
+            InlineKeyboardButton(
+                f"· {page + 1}/{total_pages} ·", callback_data="sx:noop"
+            )
+        )
+        if page < total_pages - 1:
+            nav.append(InlineKeyboardButton("Next »", callback_data=f"sg:{page + 1}"))
+        nav.append(InlineKeyboardButton("🔍 Search", callback_data="ss"))
+        rows.append(nav)
+        rows.append([InlineKeyboardButton("✗ Close", callback_data="sx")])
+
+        header_lines = ["📂 *Sessions*"]
+        if query:
+            header_lines.append(f'🔍 Search: "{query}"')
+        header_lines.append(f"Page {page + 1}/{total_pages} · {total} total")
+        header = "\n".join(header_lines)
+        return InlineKeyboardMarkup(rows), header
+
+    async def send_sessions_picker(
+        self,
+        chat_id: str,
+        sessions: list,
+        session_key: str,
+        on_session_selected,
+        metadata: "Optional[Dict[str, Any]]" = None,
+    ) -> "SendResult":
+        """Send an interactive inline-keyboard session picker for /resume.
+
+        Mirrors ``send_model_picker``: builds the markup, stores the state
+        keyed by chat_id, sends the message, and registers the
+        ``on_session_selected`` callback that runs when the user taps a row.
+        """
+        if not self._bot:
+            return SendResult(success=False, error="Not connected")
+
+        if not sessions:
+            return SendResult(success=False, error="No sessions to show")
+
+        # Evict any expired picker state for this chat (TTL).
+        self._evict_expired_session_picker(chat_id)
+
+        # Default to page 0 on first send; preserve page if chat already has
+        # a picker open (e.g. user typed /resume twice).
+        existing = self._session_picker_state.get(str(chat_id))
+        page = 0 if not existing else int(existing.get("page", 0))
+
+        import time as _time
+        state = {
+            "sessions": list(sessions),
+            "page": page,
+            "query": None,
+            "awaiting_query": False,
+            "started_at": _time.time(),
+            "on_session_selected": on_session_selected,
+            "metadata": metadata,
+        }
+        self._session_picker_state[str(chat_id)] = state
+
+        keyboard, header = self._build_sessions_keyboard(
+            state["sessions"], state["page"], state.get("query")
+        )
+        text = self.format_message(header)
+
+        try:
+            thread_id = metadata.get("thread_id") if metadata else None
+            reply_to_id = self._reply_to_message_id_for_send(
+                None, metadata, reply_to_mode=self._reply_to_mode
+            )
+            msg = await self._send_message_with_thread_fallback(
+                chat_id=int(chat_id),
+                text=text,
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=keyboard,
+                reply_to_message_id=reply_to_id,
+                **self._thread_kwargs_for_send(
+                    chat_id,
+                    thread_id,
+                    metadata,
+                ),
+            )
+            return SendResult(
+                success=True,
+                message_id=msg.message_id if msg else None,
+            )
+        except Exception as e:
+            logger.warning("[%s] send_sessions_picker failed: %s", self.name, e)
+            # Roll back the state we just inserted so we don't leave a phantom.
+            self._session_picker_state.pop(str(chat_id), None)
+            return SendResult(success=False, error=str(e))
+
+    def _evict_expired_session_picker(self, chat_id) -> None:
+        """Drop the picker state for ``chat_id`` if older than the TTL."""
+        import time as _time
+        state = self._session_picker_state.get(str(chat_id))
+        if not state:
+            return
+        if _time.time() - float(state.get("started_at", 0)) > self._SESSION_PICKER_TTL_SECONDS:
+            self._session_picker_state.pop(str(chat_id), None)
+
+    async def _handle_sessions_picker_callback(
+        self, query, data: str, chat_id: str
+    ) -> None:
+        """Handle inline-keyboard callbacks for the session picker.
+
+        Callback data format:
+          - ``sr:<idx>`` → resume session at absolute index
+          - ``sg:<page>`` → goto page (re-render)
+          - ``ss``       → enter search mode (next user text = query)
+          - ``sx``       → close picker
+          - ``sx:noop``  → no-op (e.g. the page indicator button)
+        """
+        state = self._session_picker_state.get(chat_id)
+        if not state:
+            try:
+                await query.answer(text="Picker expired — use /resume again.")
+            except Exception:
+                pass
+            return
+
+        try:
+            # Resume a specific session.
+            if data.startswith("sr:"):
+                try:
+                    idx = int(data.split(":", 1)[1])
+                except (ValueError, IndexError):
+                    await query.answer(text="Invalid index.")
+                    return
+                sessions = state["sessions"]
+                if idx < 0 or idx >= len(sessions):
+                    await query.answer(text="Out of range.")
+                    return
+                target_id = sessions[idx].get("id")
+                if not target_id:
+                    await query.answer(text="Session has no id.")
+                    return
+
+                title = sessions[idx].get("title") or target_id
+                await query.answer(text=f"Resuming '{title}'…")
+
+                # Clear picker state — it's served its purpose.
+                self._session_picker_state.pop(chat_id, None)
+
+                # Dim the picker to signal selection.
+                try:
+                    await query.edit_message_reply_markup(reply_markup=None)
+                except Exception:
+                    pass
+
+                on_selected = state.get("on_session_selected")
+                if on_selected is None:
+                    logger.warning(
+                        "[%s] session picker callback fired without on_session_selected",
+                        self.name,
+                    )
+                    return
+                try:
+                    confirmation = await on_selected(chat_id, target_id)
+                except Exception as exc:
+                    logger.error(
+                        "[%s] on_session_selected raised: %s", self.name, exc, exc_info=True
+                    )
+                    confirmation = f"❌ Resume failed: {exc}"
+                if confirmation:
+                    # Send a follow-up message with the resume confirmation.
+                    # We use the bot directly (not _send_text) so we don't
+                    # have to mock the gateway's thread-fallback plumbing in
+                    # tests. The resume confirmation is a fresh message, not
+                    # a thread-anchored reply.
+                    try:
+                        await self._bot.send_message(
+                            chat_id=int(chat_id),
+                            text=self.format_message(confirmation),
+                            parse_mode=ParseMode.MARKDOWN_V2,
+                        )
+                    except Exception:
+                        pass
+                return
+
+            # Pagination.
+            if data.startswith("sg:"):
+                try:
+                    page = int(data.split(":", 1)[1])
+                except (ValueError, IndexError):
+                    await query.answer(text="Invalid page.")
+                    return
+                state["page"] = page
+                keyboard, header = self._build_sessions_keyboard(
+                    state["sessions"], state["page"], state.get("query")
+                )
+                try:
+                    await query.edit_message_text(
+                        text=self.format_message(header),
+                        parse_mode=ParseMode.MARKDOWN_V2,
+                        reply_markup=keyboard,
+                    )
+                except Exception:
+                    pass
+                await query.answer()
+                return
+
+            # Enter search mode.
+            if data == "ss":
+                state["awaiting_query"] = True
+                await query.answer(
+                    text="Send the keyword to filter sessions (or /cancel)."
+                )
+                # Visually hint the user: edit the header to a search prompt,
+                # keep the keyboard so they can still navigate.
+                keyboard, _ = self._build_sessions_keyboard(
+                    state["sessions"], state["page"], state.get("query")
+                )
+                prompt = self.format_message(
+                    "🔍 *Search sessions*\n\nSend a keyword to filter by title or "
+                    "preview. Tap « Back to sessions below to cancel."
+                )
+                try:
+                    await query.edit_message_text(
+                        text=prompt,
+                        parse_mode=ParseMode.MARKDOWN_V2,
+                        reply_markup=keyboard,
+                    )
+                except Exception:
+                    pass
+                return
+
+            # Close the picker.
+            if data == "sx":
+                self._session_picker_state.pop(chat_id, None)
+                try:
+                    await query.edit_message_text(
+                        text=self.format_message("(picker closed)"),
+                        reply_markup=None,
+                    )
+                except Exception:
+                    pass
+                await query.answer(text="Closed.")
+                return
+
+            # No-op (e.g. tapping the page indicator).
+            if data == "sx:noop":
+                await query.answer()
+                return
+
+        except Exception:
+            logger.exception("[%s] session picker callback error", self.name)
+            try:
+                await query.answer(text="Error — try /resume again.")
+            except Exception:
+                pass
+
+    async def handle_sessions_picker_search_input(
+        self, chat_id: str, text: str
+    ) -> "Optional[str]":
+        """If the chat has a picker awaiting a search query, consume ``text``.
+
+        Returns the confirmation message if consumed, None otherwise. Used by
+        the Telegram message handler to intercept free-text messages that
+        follow a 🔍 Search tap.
+        """
+        state = self._session_picker_state.get(str(chat_id))
+        if not state or not state.get("awaiting_query"):
+            return None
+        # Slash command: cancel the search and let the command proceed.
+        if text.lstrip().startswith("/"):
+            state["awaiting_query"] = False
+            return None
+
+        query_text = text.strip()
+        if not query_text:
+            return None
+
+        # Cancel keywords.
+        if query_text.lower() in {"/cancel", "cancel", "✗", "x"}:
+            state["awaiting_query"] = False
+            return "(search cancelled)"
+
+        # Filter sessions by title/preview (case-insensitive substring).
+        needle = query_text.lower()
+        all_sessions = state["sessions"]
+        filtered = [
+            s
+            for s in all_sessions
+            if needle in (s.get("title") or "").lower()
+            or needle in (s.get("preview") or "").lower()
+        ]
+        state["query"] = query_text
+        state["page"] = 0
+        state["awaiting_query"] = False
+
+        if not filtered:
+            # Empty result: re-render the existing picker with an info message.
+            keyboard, header = self._build_sessions_keyboard(
+                all_sessions, state["page"], query=query_text
+            )
+            header = f"🔍 No matches for \"{query_text}\"\n\n{header}"
+            try:
+                await self._bot.send_message(
+                    chat_id=int(chat_id),
+                    text=self.format_message(header),
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                    reply_markup=keyboard,
+                )
+            except Exception as e:
+                logger.warning("[%s] search no-match send failed: %s", self.name, e)
+            return f'(no matches for "{query_text}")'
+
+        keyboard, header = self._build_sessions_keyboard(
+            filtered, 0, query=query_text
+        )
+        try:
+            await self._bot.send_message(
+                chat_id=int(chat_id),
+                text=self.format_message(header),
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=keyboard,
+            )
+        except Exception as e:
+            logger.warning("[%s] search results send failed: %s", self.name, e)
+            return f'(search failed to render: {e})'
+        return None  # we already sent the message
+
     _MODEL_PAGE_SIZE = 8
 
     def _build_provider_keyboard(self, providers: list):
@@ -3249,6 +3628,16 @@ class TelegramAdapter(BasePlatformAdapter):
             chat_id = str(query.message.chat_id) if query.message else None
             if chat_id:
                 await self._handle_model_picker_callback(query, data, chat_id)
+            return
+
+        # --- Session picker callbacks (/resume, /sessions) ---
+        # Order matters: longer prefixes (sr:/sg:/sx:noop) are more specific
+        # than the bare 2-char ones (ss/sx). startswith() handles this fine
+        # since "ss" and "sx" don't appear as prefixes of any other callback.
+        if data.startswith(("sr:", "sg:", "ss", "sx")):
+            chat_id = str(query.message.chat_id) if query.message else None
+            if chat_id:
+                await self._handle_sessions_picker_callback(query, data, chat_id)
             return
 
         # --- Gmail-triage callbacks (gt:verb:arg) ---
@@ -5195,6 +5584,23 @@ class TelegramAdapter(BasePlatformAdapter):
                 self._observe_unmentioned_group_message(msg, MessageType.TEXT, update_id=update.update_id)
             return
         await self._ensure_forum_commands(update.message)
+
+        # Session picker search interceptor: if a chat has a picker awaiting
+        # a query, consume this message as the search input and do NOT forward
+        # it to the agent.
+        if getattr(self, "_session_picker_state", None):
+            chat_id = str(getattr(msg.chat, "id", "") or "")
+            if chat_id and self._session_picker_state.get(chat_id, {}).get(
+                "awaiting_query"
+            ):
+                consumed = await self.handle_sessions_picker_search_input(
+                    chat_id, msg.text
+                )
+                # Only return early if the input was actually consumed. Slash
+                # commands inside awaiting state are passed through to the
+                # normal command handler.
+                if consumed is not None:
+                    return
 
         event = self._build_message_event(msg, MessageType.TEXT, update_id=update.update_id)
         event.text = self._clean_bot_trigger_text(event.text)

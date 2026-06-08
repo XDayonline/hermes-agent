@@ -13899,14 +13899,61 @@ class GatewayRunner:
         ):
             name = name[1:-1].strip()
 
-        def _list_titled_sessions() -> list[dict]:
+        def _list_titled_sessions(limit: int = 10) -> list[dict]:
             user_source = source.platform.value if source.platform else None
-            sessions = self._session_db.list_sessions_rich(source=user_source, limit=10)
-            return [s for s in sessions if s.get("title")][:10]
+            sessions = self._session_db.list_sessions_rich(
+                source=user_source, limit=limit, order_by_last_active=True
+            )
+            return [s for s in sessions if s.get("title")][:limit]
 
         if not name:
             # List recent titled sessions for this user/platform
             try:
+                # Telegram (and any other adapter with send_sessions_picker)
+                # gets a paginated inline keyboard. The adapter stores picker
+                # state and dispatches the resume via the on_session_selected
+                # callback when the user taps a row. Limit is bumped to 50 so
+                # the picker has enough to paginate beyond the legacy 10.
+                adapter = self.adapters.get(source.platform)
+                if (
+                    adapter is not None
+                    and getattr(type(adapter), "send_sessions_picker", None) is not None
+                ):
+                    user_source = source.platform.value if source.platform else None
+                    picker_sessions = self._session_db.list_sessions_rich(
+                        source=user_source, limit=50, order_by_last_active=True
+                    )
+                    picker_sessions = [s for s in picker_sessions if s.get("title")]
+                    if not picker_sessions:
+                        return t("gateway.resume.no_named_sessions")
+
+                    _self = self
+                    _session_key = session_key
+
+                    async def _on_session_selected(
+                        _chat_id: str, target_id: str
+                    ) -> str:
+                        return _self._resume_to_session_id(
+                            session_key=_session_key,
+                            source=source,
+                            target_id=target_id,
+                            name=target_id,
+                        )
+
+                    metadata = self._thread_metadata_for_source(
+                        source, self._reply_anchor_for_event(event)
+                    )
+                    result = await adapter.send_sessions_picker(
+                        chat_id=source.chat_id,
+                        sessions=picker_sessions,
+                        session_key=session_key,
+                        on_session_selected=_on_session_selected,
+                        metadata=metadata,
+                    )
+                    if result.success:
+                        return None  # Picker sent — adapter handles selection
+
+                # Plain text fallback (or picker failed): legacy numbered list.
                 user_source = source.platform.value if source.platform else None
                 sessions = self._session_db.list_sessions_rich(
                     source=user_source, limit=20, order_by_last_active=True
@@ -13949,6 +13996,23 @@ class GatewayRunner:
                 target_id = self._session_db.resolve_session_by_title(name)
         if not target_id:
             return t("gateway.resume.not_found", name=name)
+        return self._resume_to_session_id(
+            session_key=session_key,
+            source=source,
+            target_id=target_id,
+            name=name,
+        )
+
+    def _resume_to_session_id(
+        self, *, session_key: str, source, target_id: str, name: str
+    ) -> str:
+        """Resolve a session id, switch the active session, and return a
+        confirmation string. Shared between ``_handle_resume_command`` (CLI
+        /resume <arg>) and the Telegram session-picker callback path.
+
+        Compression creates child continuations that hold the live transcript.
+        Follow that chain so gateway /resume matches CLI behavior (#15000).
+        """
         # Compression creates child continuations that hold the live transcript.
         # Follow that chain so gateway /resume matches CLI behavior (#15000).
         try:
