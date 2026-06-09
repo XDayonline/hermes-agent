@@ -3145,12 +3145,31 @@ class TelegramAdapter(BasePlatformAdapter):
                     # have to mock the gateway's thread-fallback plumbing in
                     # tests. The resume confirmation is a fresh message, not
                     # a thread-anchored reply.
+                    #
+                    # Propagate the thread context from the picker's metadata
+                    # so the confirmation lands in the same topic/thread the
+                    # picker was opened in (e.g. a Telegram forum topic,
+                    # not the General root). Otherwise topic routing is lost
+                    # and the message drops into the General lane (#fix).
                     try:
-                        await self._bot.send_message(
-                            chat_id=int(chat_id),
-                            text=self.format_message(confirmation),
-                            parse_mode=ParseMode.MARKDOWN_V2,
+                        send_kwargs = {
+                            "chat_id": int(chat_id),
+                            "text": self.format_message(confirmation),
+                            "parse_mode": ParseMode.MARKDOWN_V2,
+                        }
+                        picker_meta = state.get("metadata") or {}
+                        picker_thread_id = (
+                            picker_meta.get("thread_id") if picker_meta else None
                         )
+                        if picker_thread_id is not None:
+                            send_kwargs.update(
+                                self._thread_kwargs_for_send(
+                                    chat_id,
+                                    str(picker_thread_id),
+                                    picker_meta,
+                                )
+                            )
+                        await self._bot.send_message(**send_kwargs)
                     except Exception:
                         pass
                 return
