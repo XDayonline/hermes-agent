@@ -3292,12 +3292,23 @@ class TelegramAdapter(BasePlatformAdapter):
             )
             header = f"🔍 No matches for \"{query_text}\"\n\n{header}"
             try:
-                await self._bot.send_message(
-                    chat_id=int(chat_id),
-                    text=self.format_message(header),
-                    parse_mode=ParseMode.MARKDOWN_V2,
-                    reply_markup=keyboard,
+                send_kwargs = {
+                    "chat_id": int(chat_id),
+                    "text": self.format_message(header),
+                    "parse_mode": ParseMode.MARKDOWN_V2,
+                    "reply_markup": keyboard,
+                }
+                picker_meta = state.get("metadata") or {}
+                picker_thread = (
+                    picker_meta.get("thread_id") if picker_meta else None
                 )
+                if picker_thread is not None:
+                    send_kwargs.update(
+                        self._thread_kwargs_for_send(
+                            chat_id, str(picker_thread), picker_meta
+                        )
+                    )
+                await self._bot.send_message(**send_kwargs)
             except Exception as e:
                 logger.warning("[%s] search no-match send failed: %s", self.name, e)
             return f'(no matches for "{query_text}")'
@@ -3306,12 +3317,23 @@ class TelegramAdapter(BasePlatformAdapter):
             filtered, 0, query=query_text
         )
         try:
-            await self._bot.send_message(
-                chat_id=int(chat_id),
-                text=self.format_message(header),
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=keyboard,
+            send_kwargs = {
+                "chat_id": int(chat_id),
+                "text": self.format_message(header),
+                "parse_mode": ParseMode.MARKDOWN_V2,
+                "reply_markup": keyboard,
+            }
+            picker_meta = state.get("metadata") or {}
+            picker_thread = (
+                picker_meta.get("thread_id") if picker_meta else None
             )
+            if picker_thread is not None:
+                send_kwargs.update(
+                    self._thread_kwargs_for_send(
+                        chat_id, str(picker_thread), picker_meta
+                    )
+                )
+            await self._bot.send_message(**send_kwargs)
         except Exception as e:
             logger.warning("[%s] search results send failed: %s", self.name, e)
             return f'(search failed to render: {e})'
