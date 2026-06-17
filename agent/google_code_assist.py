@@ -31,6 +31,7 @@ import json
 import logging
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import dataclass, field
@@ -220,6 +221,8 @@ def load_code_assist(
     *,
     project_id: str = "",
     user_agent_model: str = "",
+    endpoint: str = CODE_ASSIST_ENDPOINT,
+    fallback_endpoints: Optional[List[str]] = None,
 ) -> CodeAssistProjectInfo:
     """Call ``POST /v1internal:loadCodeAssist`` with prod → sandbox fallback.
 
@@ -235,7 +238,12 @@ def load_code_assist(
     if project_id:
         body["cloudaicompanionProject"] = project_id
 
-    endpoints = [CODE_ASSIST_ENDPOINT] + FALLBACK_ENDPOINTS
+    fallbacks = (
+        FALLBACK_ENDPOINTS
+        if fallback_endpoints is None and endpoint == CODE_ASSIST_ENDPOINT
+        else list(fallback_endpoints or [])
+    )
+    endpoints = [endpoint] + fallbacks
     last_err: Optional[Exception] = None
     for endpoint in endpoints:
         url = f"{endpoint}/v1internal:loadCodeAssist"
@@ -287,6 +295,7 @@ def onboard_user(
     tier_id: str,
     project_id: str = "",
     user_agent_model: str = "",
+    endpoint: str = CODE_ASSIST_ENDPOINT,
 ) -> Dict[str, Any]:
     """Call ``POST /v1internal:onboardUser`` to provision the user.
 
@@ -310,7 +319,6 @@ def onboard_user(
     if project_id:
         body["cloudaicompanionProject"] = project_id
 
-    endpoint = CODE_ASSIST_ENDPOINT
     url = f"{endpoint}/v1internal:onboardUser"
     resp = _post_json(url, body, access_token, user_agent_model=user_agent_model)
 
@@ -394,6 +402,7 @@ def resolve_project_context(
     configured_project_id: str = "",
     env_project_id: str = "",
     user_agent_model: str = "",
+    code_assist_endpoint: str = CODE_ASSIST_ENDPOINT,
 ) -> ProjectContext:
     """Figure out what project id + tier to use for requests.
 
@@ -418,7 +427,11 @@ def resolve_project_context(
         )
 
     # Discover via loadCodeAssist
-    info = load_code_assist(access_token, user_agent_model=user_agent_model)
+    info = load_code_assist(
+        access_token,
+        user_agent_model=user_agent_model,
+        endpoint=code_assist_endpoint,
+    )
 
     effective_project = info.cloudaicompanion_project
     tier = info.current_tier_id
@@ -430,6 +443,7 @@ def resolve_project_context(
             tier_id=FREE_TIER_ID,
             project_id="",
             user_agent_model=user_agent_model,
+            endpoint=code_assist_endpoint,
         )
         # Re-parse from the onboard response
         response_body = onboard_resp.get("response") or {}

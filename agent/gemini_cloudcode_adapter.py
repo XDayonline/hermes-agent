@@ -1,9 +1,9 @@
 """OpenAI-compatible facade that talks to Google's Cloud Code Assist backend.
 
-This adapter lets Hermes use the ``google-gemini-cli`` provider as if it were
-a standard OpenAI-shaped chat completion endpoint, while the underlying HTTP
-traffic goes to ``cloudcode-pa.googleapis.com/v1internal:{generateContent,
-streamGenerateContent}`` with a Bearer access token obtained via OAuth PKCE.
+This adapter lets Hermes use the ``google-gemini-cli`` and ``antigravity-cli``
+providers as if they were standard OpenAI-shaped chat completion endpoints,
+while the underlying HTTP traffic goes to Google's Code Assist backends with a
+Bearer access token obtained via OAuth PKCE.
 
 Architecture
 ------------
@@ -12,8 +12,9 @@ Architecture
 - Incoming OpenAI ``messages[]`` / ``tools[]`` / ``tool_choice`` are translated
   to Gemini's native ``contents[]`` / ``tools[].functionDeclarations`` /
   ``toolConfig`` / ``systemInstruction`` shape.
-- The request body is wrapped ``{project, model, user_prompt_id, request}``
-  per Code Assist API expectations.
+- Gemini CLI requests are wrapped ``{project, model, user_prompt_id, request}``;
+  Antigravity requests use the daily backend's agent envelope
+  ``{project, requestId, model, userAgent, requestType, request}``.
 - Responses (``candidates[].content.parts[]``) are converted back to
   OpenAI ``choices[0].message`` shape with ``content`` + ``tool_calls``.
 - Streaming uses SSE (``?alt=sse``) and yields OpenAI-shaped delta chunks.
@@ -21,9 +22,9 @@ Architecture
 Attribution
 -----------
 Translation semantics follow jenslys/opencode-gemini-auth (MIT) and the public
-Gemini API docs. Request envelope shape
-(``{project, model, user_prompt_id, request}``) is documented nowhere; it is
-reverse-engineered from the opencode-gemini-auth and clawdbot implementations.
+Gemini API docs. Request envelope shapes are documented nowhere; Gemini CLI
+support is reverse-engineered from the opencode-gemini-auth and clawdbot
+implementations, while Antigravity support follows captured ``agy`` traffic.
 """
 
 from __future__ import annotations
@@ -93,14 +94,11 @@ def _translate_tool_call_to_gemini(tool_call: Dict[str, Any]) -> Dict[str, Any]:
         args = {"_raw": args_raw}
     if not isinstance(args, dict):
         args = {"_value": args}
-    function_call = {
-        "name": fn.get("name") or "",
-        "args": args,
-    }
-    if tool_call.get("id"):
-        function_call["id"] = str(tool_call["id"])
     return {
-        "functionCall": function_call,
+        "functionCall": {
+            "name": fn.get("name") or "",
+            "args": args,
+        },
         # Sentinel signature — matches opencode-gemini-auth's approach.
         # Without this, Code Assist rejects function calls that originated
         # outside its own chain.
@@ -125,13 +123,12 @@ def _translate_tool_result_to_gemini(message: Dict[str, Any]) -> Dict[str, Any]:
     except json.JSONDecodeError:
         parsed = None
     response = parsed if isinstance(parsed, dict) else {"output": content}
-    function_response = {
-        "name": name,
-        "response": response,
+    return {
+        "functionResponse": {
+            "name": name,
+            "response": response,
+        },
     }
-    if message.get("tool_call_id"):
-        function_response["id"] = str(message["tool_call_id"])
-    return {"functionResponse": function_response}
 
 
 def _build_gemini_contents(
@@ -362,9 +359,8 @@ def _translate_gemini_response(
                 args_str = json.dumps(fc.get("args") or {}, ensure_ascii=False)
             except (TypeError, ValueError):
                 args_str = "{}"
-            call_id = str(fc.get("id") or "").strip() or f"call_{uuid.uuid4().hex[:12]}"
             tool_calls.append(SimpleNamespace(
-                id=call_id,
+                id=f"call_{uuid.uuid4().hex[:12]}",
                 type="function",
                 index=i,
                 function=SimpleNamespace(name=str(fc["name"]), arguments=args_str),
@@ -559,7 +555,6 @@ def _translate_stream_event(
                 model=model,
                 tool_call_delta={
                     "index": idx,
-                    "id": str(fc.get("id") or "").strip(),
                     "name": name,
                     "arguments": args_str,
                 },
@@ -574,11 +569,98 @@ def _translate_stream_event(
     return chunks
 
 
+def _collect_stream_response(
+    stream: Iterator[_GeminiStreamChunk],
+    *,
+    model: str,
+) -> SimpleNamespace:
+    """Aggregate SSE chunks into a non-streaming OpenAI-shaped response."""
+    text_pieces: List[str] = []
+    reasoning_pieces: List[str] = []
+    tool_calls: List[SimpleNamespace] = []
+    finish_reason = "stop"
+
+    for chunk in stream:
+        choices = getattr(chunk, "choices", None) or []
+        if not choices:
+            continue
+        choice = choices[0]
+        delta = getattr(choice, "delta", None)
+        if delta is not None:
+            content = getattr(delta, "content", None)
+            if isinstance(content, str) and content:
+                text_pieces.append(content)
+            reasoning = (
+                getattr(delta, "reasoning", None)
+                or getattr(delta, "reasoning_content", None)
+            )
+            if isinstance(reasoning, str) and reasoning:
+                reasoning_pieces.append(reasoning)
+            delta_tool_calls = getattr(delta, "tool_calls", None) or []
+            for tool_call in delta_tool_calls:
+                tool_calls.append(tool_call)
+        choice_finish = getattr(choice, "finish_reason", None)
+        if choice_finish:
+            finish_reason = str(choice_finish)
+
+    if not text_pieces and not reasoning_pieces and not tool_calls:
+        return _empty_response(model)
+
+    reasoning_text = "".join(reasoning_pieces) or None
+    message = SimpleNamespace(
+        role="assistant",
+        content="".join(text_pieces) if text_pieces else None,
+        tool_calls=tool_calls or None,
+        reasoning=reasoning_text,
+        reasoning_content=reasoning_text,
+        reasoning_details=None,
+    )
+    choice = SimpleNamespace(
+        index=0,
+        message=message,
+        finish_reason="tool_calls" if tool_calls else finish_reason,
+    )
+    usage = SimpleNamespace(
+        prompt_tokens=0,
+        completion_tokens=0,
+        total_tokens=0,
+        prompt_tokens_details=SimpleNamespace(cached_tokens=0),
+    )
+    return SimpleNamespace(
+        id=f"chatcmpl-{uuid.uuid4().hex[:12]}",
+        object="chat.completion",
+        created=int(time.time()),
+        model=model,
+        choices=[choice],
+        usage=usage,
+    )
+
+
 # =============================================================================
 # GeminiCloudCodeClient — OpenAI-compatible facade
 # =============================================================================
 
 MARKER_BASE_URL = "cloudcode-pa://google"
+ANTIGRAVITY_CODE_ASSIST_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com"
+_ANTIGRAVITY_USER_AGENT = "antigravity"
+_ANTIGRAVITY_REQUEST_TYPE = "agent"
+
+# Antigravity exposes clean user-facing tier ids, but some tiers still route to
+# legacy upstream ids on the daily-cloudcode backend. Keep the picker clean and
+# translate only at dispatch time.
+ANTIGRAVITY_MODEL_ALIASES = {
+    "gemini-3.5-flash-low": "gemini-3.5-flash-extra-low",
+    "gemini-3.5-flash-medium": "gemini-3.5-flash-low",
+    "gemini-3.5-flash-high": "gemini-3-flash-agent",
+    "gemini-3.5-flash-preview": "gemini-3-flash-agent",
+}
+
+
+def _resolve_antigravity_model_id(model: str) -> str:
+    """Return the upstream Antigravity model id for a user-facing tier id."""
+    if not model:
+        return model
+    return ANTIGRAVITY_MODEL_ALIASES.get(model, model)
 
 
 class _GeminiChatCompletions:
@@ -604,17 +686,21 @@ class GeminiCloudCodeClient:
         base_url: Optional[str] = None,
         default_headers: Optional[Dict[str, str]] = None,
         project_id: str = "",
+        credential_source: str = "google-gemini-cli",
         **_: Any,
     ):
         # `api_key` here is a dummy — real auth is the OAuth access token
-        # fetched on every call via agent.google_oauth.get_valid_access_token().
+        # fetched on every call from the selected OAuth credential source.
         # We accept the kwarg for openai.OpenAI interface parity.
-        self.api_key = api_key or "google-oauth"
+        self.credential_source = (credential_source or "google-gemini-cli").strip().lower()
+        self.api_key = api_key or f"{self.credential_source}-oauth"
         self.base_url = base_url or MARKER_BASE_URL
         self._default_headers = dict(default_headers or {})
         self._configured_project_id = project_id
         self._project_context: Optional[ProjectContext] = None
         self._project_context_lock = False  # simple single-thread guard
+        self._antigravity_session_id = str(uuid.uuid4())
+        self._antigravity_request_index = 0
         self.chat = _GeminiChatNamespace(self)
         self.is_closed = False
         self._http = httpx.Client(timeout=httpx.Timeout(connect=15.0, read=600.0, write=30.0, pool=30.0))
@@ -633,13 +719,32 @@ class GeminiCloudCodeClient:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
 
+    def _get_access_token(self) -> str:
+        if self.credential_source == "antigravity-cli":
+            from agent import antigravity_oauth
+
+            return antigravity_oauth.get_valid_access_token()
+        return google_oauth.get_valid_access_token()
+
+    def _endpoint(self) -> str:
+        if self.credential_source == "antigravity-cli":
+            return ANTIGRAVITY_CODE_ASSIST_ENDPOINT
+        return CODE_ASSIST_ENDPOINT
+
+    def _next_antigravity_request_id(self) -> str:
+        self._antigravity_request_index += 1
+        return (
+            f"agent/{self._antigravity_session_id}/"
+            f"{int(time.time() * 1000)}/{uuid.uuid4()}/{self._antigravity_request_index}"
+        )
+
     def _ensure_project_context(self, access_token: str, model: str) -> ProjectContext:
         """Lazily resolve and cache the project context for this client."""
         if self._project_context is not None:
             return self._project_context
 
         env_project = google_oauth.resolve_project_id_from_env()
-        creds = google_oauth.load_credentials()
+        creds = google_oauth.load_credentials() if self.credential_source == "google-gemini-cli" else None
         stored_project = creds.project_id if creds else ""
 
         # Prefer what's already baked into the creds
@@ -657,10 +762,11 @@ class GeminiCloudCodeClient:
             configured_project_id=self._configured_project_id,
             env_project_id=env_project,
             user_agent_model=model,
+            code_assist_endpoint=self._endpoint(),
         )
         # Persist discovered project back to the creds file so the next
         # session doesn't re-run the discovery.
-        if ctx.project_id or ctx.managed_project_id:
+        if self.credential_source == "google-gemini-cli" and (ctx.project_id or ctx.managed_project_id):
             google_oauth.update_project_ids(
                 project_id=ctx.project_id,
                 managed_project_id=ctx.managed_project_id,
@@ -684,8 +790,14 @@ class GeminiCloudCodeClient:
         timeout: Any = None,
         **_: Any,
     ) -> Any:
-        access_token = google_oauth.get_valid_access_token()
-        ctx = self._ensure_project_context(access_token, model)
+        access_token = self._get_access_token()
+        requested_model = model
+        wire_model = (
+            _resolve_antigravity_model_id(model)
+            if self.credential_source == "antigravity-cli"
+            else model
+        )
+        ctx = self._ensure_project_context(access_token, wire_model)
 
         thinking_config = None
         if isinstance(extra_body, dict):
@@ -701,26 +813,51 @@ class GeminiCloudCodeClient:
             stop=stop,
             thinking_config=thinking_config,
         )
-        wrapped = wrap_code_assist_request(
-            project_id=ctx.project_id,
-            model=model,
-            inner_request=inner,
-        )
+        if self.credential_source == "antigravity-cli":
+            wrapped = {
+                "project": ctx.project_id,
+                "requestId": self._next_antigravity_request_id(),
+                "model": wire_model,
+                "userAgent": _ANTIGRAVITY_USER_AGENT,
+                "requestType": _ANTIGRAVITY_REQUEST_TYPE,
+                "request": inner,
+            }
+        else:
+            wrapped = wrap_code_assist_request(
+                project_id=ctx.project_id,
+                model=wire_model,
+                inner_request=inner,
+            )
 
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "Authorization": f"Bearer {access_token}",
-            "User-Agent": "hermes-agent (gemini-cli-compat)",
-            "X-Goog-Api-Client": "gl-python/hermes",
-            "x-activity-request-id": str(uuid.uuid4()),
-        }
+        if self.credential_source == "antigravity-cli":
+            headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "Authorization": f"Bearer {access_token}",
+                "User-Agent": _ANTIGRAVITY_USER_AGENT,
+                "x-activity-request-id": str(uuid.uuid4()),
+            }
+        else:
+            headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "Authorization": f"Bearer {access_token}",
+                "User-Agent": "hermes-agent (gemini-cli-compat)",
+                "X-Goog-Api-Client": "gl-python/hermes",
+                "x-activity-request-id": str(uuid.uuid4()),
+            }
         headers.update(self._default_headers)
 
         if stream:
-            return self._stream_completion(model=model, wrapped=wrapped, headers=headers)
+            return self._stream_completion(model=requested_model, wrapped=wrapped, headers=headers)
 
-        url = f"{CODE_ASSIST_ENDPOINT}/v1internal:generateContent"
+        if self.credential_source == "antigravity-cli":
+            return _collect_stream_response(
+                self._stream_completion(model=requested_model, wrapped=wrapped, headers=headers),
+                model=requested_model,
+            )
+
+        url = f"{self._endpoint()}/v1internal:generateContent"
         response = self._http.post(url, json=wrapped, headers=headers)
         if response.status_code != 200:
             raise _gemini_http_error(response)
@@ -741,7 +878,7 @@ class GeminiCloudCodeClient:
         headers: Dict[str, str],
     ) -> Iterator[_GeminiStreamChunk]:
         """Generator that yields OpenAI-shaped streaming chunks."""
-        url = f"{CODE_ASSIST_ENDPOINT}/v1internal:streamGenerateContent?alt=sse"
+        url = f"{self._endpoint()}/v1internal:streamGenerateContent?alt=sse"
         stream_headers = dict(headers)
         stream_headers["Accept"] = "text/event-stream"
 

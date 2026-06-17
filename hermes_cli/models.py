@@ -256,6 +256,19 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "gemini-3-flash-preview",
         "gemini-3.5-flash",
     ],
+    "google-antigravity": [
+        # Antigravity / agy catalog. Low/Medium/High are user-visible tiers in
+        # the Antigravity model selector, not Hermes reasoning flags.
+        "gemini-3.5-flash-low",
+        "gemini-3.5-flash-medium",
+        "gemini-3.5-flash-high",
+        "gemini-3.1-pro-low",
+        "gemini-3.1-pro-high",
+        "gemini-pro-agent",
+        "claude-sonnet-4-6",
+        "claude-opus-4-6-thinking",
+        "gpt-oss-120b-medium",
+    ],
     "zai": [
         "glm-5.2",
         "glm-5.1",
@@ -1009,6 +1022,7 @@ CANONICAL_PROVIDERS: list[ProviderEntry] = [
     ProviderEntry("huggingface",    "Hugging Face",             "Hugging Face Inference Providers"),
     ProviderEntry("gemini",         "Google AI Studio",         "Google AI Studio (Native Gemini API)"),
     ProviderEntry("google-gemini-cli", "Google Gemini (OAuth)",   "Google Gemini via OAuth + Code Assist (Code Assist OAuth flow)"),
+    ProviderEntry("google-antigravity", "Google Antigravity CLI (agy)", "Antigravity CLI via OAuth (reads agy token, agy login required)"),
     ProviderEntry("deepseek",       "DeepSeek",                 "DeepSeek (V3, R1, coder, direct API)"),
     ProviderEntry("xai",            "xAI",                      "xAI Grok (Direct API)"),
     ProviderEntry("zai",            "Z.AI / GLM",               "Z.AI / GLM (Zhipu direct API)"),
@@ -1079,7 +1093,7 @@ PROVIDER_GROUPS: dict[str, tuple[str, str, list[str]]] = {
     "kimi":     ("Kimi / Moonshot", "Coding Plan, Moonshot global & China endpoints", ["kimi-coding", "kimi-coding-cn"]),
     "minimax":  ("MiniMax",         "Global, OAuth Coding Plan & China endpoints",     ["minimax", "minimax-oauth", "minimax-cn"]),
     "xai":      ("xAI Grok",        "Direct API or SuperGrok / Premium+ OAuth",        ["xai", "xai-oauth"]),
-    "google":   ("Google Gemini",   "AI Studio API or OAuth + Code Assist",            ["gemini", "google-gemini-cli"]),
+    "google":   ("Google Gemini",   "AI Studio API, Gemini OAuth, or Antigravity CLI", ["gemini", "google-gemini-cli", "google-antigravity"]),
     "openai":   ("OpenAI",          "Codex CLI or direct OpenAI API",                  ["openai-codex", "openai-api"]),
     "opencode": ("OpenCode",        "Zen pay-as-you-go or Go subscription",            ["opencode-zen", "opencode-go"]),
     "copilot":  ("GitHub Copilot",  "GitHub token API or copilot --acp process",       ["copilot", "copilot-acp"]),
