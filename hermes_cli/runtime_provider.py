@@ -1366,6 +1366,12 @@ def resolve_runtime_provider(
         return explicit_runtime
 
     should_use_pool = provider != "openrouter"
+    # Antigravity must use agy CLI credentials, not the old PKCE credential pool.
+    # A stale manual:antigravity_pkce pool entry can return an empty base_url,
+    # then gateway in-place switching may retain the previous provider endpoint
+    # (OpenCode/Codex) and surface raw HTML error pages.
+    if provider == "google-antigravity":
+        should_use_pool = False
     if provider == "openrouter":
         cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
         cfg_base_url = str(model_cfg.get("base_url") or "").strip()
@@ -1521,8 +1527,8 @@ def resolve_runtime_provider(
             return {
                 "provider": "google-gemini-cli",
                 "api_mode": "chat_completions",
-                "base_url": creds.get("base_url", ""),
-                "api_key": creds.get("api_key", ""),
+                "base_url": creds.get("base_url", "") or "cloudcode-pa://google",
+                "api_key": creds.get("api_key", "") or "google-gemini-cli-oauth",
                 "source": creds.get("source", "google-oauth"),
                 "expires_at_ms": creds.get("expires_at_ms"),
                 "email": creds.get("email", ""),
@@ -1534,6 +1540,30 @@ def resolve_runtime_provider(
                 raise
             logger.info("Google Gemini OAuth credentials failed; "
                         "falling through to next provider.")
+
+    if provider == "google-antigravity":
+        try:
+            # Antigravity auth is owned by the agy CLI. The runtime client reads
+            # ~/.gemini/antigravity-cli/antigravity-oauth-token on every call.
+            # Return marker credentials here so CLI/gateway setup never falls
+            # through to a stale previous provider base_url.
+            from agent.antigravity_oauth import get_valid_access_token
+
+            get_valid_access_token()
+            return {
+                "provider": "google-antigravity",
+                "api_mode": "chat_completions",
+                "base_url": "antigravity-pa://google",
+                "api_key": "antigravity-cli-oauth",
+                "source": "agy-cli",
+                "requested_provider": requested_provider,
+            }
+        except Exception as exc:
+            if requested_provider != "auto":
+                raise AuthError(
+                    f"Antigravity CLI credentials unavailable: {exc}. Run `agy login` first."
+                ) from exc
+            logger.info("Antigravity CLI credentials failed; falling through to next provider.")
 
     if provider == "copilot-acp":
         creds = resolve_external_process_provider_credentials(provider)

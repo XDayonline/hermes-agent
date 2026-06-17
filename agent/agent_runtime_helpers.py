@@ -1373,32 +1373,25 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
             agent._client_log_context(),
         )
         return client
-    if agent.provider == "google-gemini-cli" or str(client_kwargs.get("base_url", "")).startswith("cloudcode-pa://"):
+    if agent.provider in {"google-gemini-cli", "google-antigravity"} or str(client_kwargs.get("base_url", "")).startswith(("cloudcode-pa://", "antigravity-pa://")):
         from agent.gemini_cloudcode_adapter import GeminiCloudCodeClient
 
         # Strip OpenAI-specific kwargs the Gemini client doesn't accept
         safe_kwargs = {
             k: v for k, v in client_kwargs.items()
-            if k in {"api_key", "base_url", "default_headers", "project_id", "timeout"}
+            if k in {"api_key", "default_headers", "project_id", "timeout"}
         }
+        is_antigravity = agent.provider == "google-antigravity" or str(client_kwargs.get("base_url", "")).startswith("antigravity-pa://")
+        safe_kwargs["credential_source"] = "antigravity-cli" if is_antigravity else "google-gemini-cli"
+        # Never carry a previous provider's base_url across an OAuth-provider switch.
+        # Gateway in-place model switching can leave agent.base_url set to the old
+        # provider (e.g. OpenCode Go). The Code Assist adapters use marker URLs only;
+        # passing the old HTTP endpoint causes HTML error pages to leak as model errors.
+        safe_kwargs["base_url"] = "antigravity-pa://google" if is_antigravity else "cloudcode-pa://google"
         client = GeminiCloudCodeClient(**safe_kwargs)
         _ra().logger.info(
-            "Gemini Cloud Code Assist client created (%s, shared=%s) %s",
-            reason,
-            shared,
-            agent._client_log_context(),
-        )
-        return client
-    if agent.provider == "google-antigravity" or str(client_kwargs.get("base_url", "")).startswith("antigravity-pa://"):
-        from agent.antigravity_cloudcode_adapter import AntigravityCloudCodeClient
-
-        safe_kwargs = {
-            k: v for k, v in client_kwargs.items()
-            if k in {"api_key", "base_url", "default_headers", "project_id", "timeout"}
-        }
-        client = AntigravityCloudCodeClient(**safe_kwargs)
-        _ra().logger.info(
-            "Antigravity Code Assist client created (%s, shared=%s) %s",
+            "%s client created (%s, shared=%s) %s",
+            "Antigravity" if is_antigravity else "Gemini Cloud Code Assist",
             reason,
             shared,
             agent._client_log_context(),
