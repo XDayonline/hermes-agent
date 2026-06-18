@@ -3365,42 +3365,54 @@ class GatewaySlashCommandsMixin:
         if not snapshots:
             return "No providers configured (no API keys found in env)."
 
-        parts: list[str] = ["📊 **Provider quota overview**", ""]
-        
-        # Build a markdown table for better alignment in Telegram
-        parts.append("| Provider | Status / Quota |")
-        parts.append("| :--- | :--- |")
-        
+        parts: list[str] = ["📊 **Provider quota overview**"]
+        provider_idx = 0
+
         for snapshot in snapshots:
-            # We want a compact summary for the table
-            status_parts = []
+            lines: list[str] = []
+
+            # Provider header
             if snapshot.unavailable_reason:
-                status_parts.append(f"❌ {snapshot.unavailable_reason}")
-            
-            # Add main window percent if available
-            for window in snapshot.windows:
-                if window.used_percent is not None:
-                    status_parts.append(f"{max(0, round(100 - float(window.used_percent)))}% left")
-                    break # Take first window for table summary
-            
-            # Add details if status_parts still empty
-            if not status_parts:
+                lines.append(f"\n**{snapshot.provider}** — ❌ {snapshot.unavailable_reason}")
+                parts.extend(lines)
+                continue
+
+            plan_info = f" ({snapshot.plan})" if snapshot.plan else ""
+            lines.append(f"\n**{snapshot.provider}**{plan_info}")
+
+            # Windows (5h / Weekly / Monthly / Session etc.)
+            if snapshot.windows:
+                for window in snapshot.windows:
+                    if window.used_percent is None:
+                        lines.append(f"  {window.label}: unavailable")
+                        continue
+                    rem = max(0, round(100 - float(window.used_percent)))
+                    reset = ""
+                    if window.reset_at:
+                        from agent.account_usage import _format_reset
+                        reset = f" — resets {_format_reset(window.reset_at)}"
+                    elif window.detail:
+                        reset = f" — {window.detail}"
+                    lines.append(f"  ◾ {window.label}: {rem}% remaining{reset}")
+
+            # Details (balance info, model-specific quotas)
+            if snapshot.details:
                 for detail in snapshot.details:
-                    # Clean WTUS or other technical prefixes for the table
-                    clean_detail = detail.split(":")[0].strip()
-                    if "% remaining" in detail:
-                        pct = detail.split(":")[1].split("%")[0].strip()
-                        status_parts.append(f"{pct}% ({clean_detail})")
-                        break # Just first one
-                    else:
-                        status_parts.append(detail)
-                        break
+                    # Strip leading " • " if present
+                    d = detail.lstrip(" •").strip()
+                    if d:
+                        lines.append(f"  ▫️ {d}")
 
-            status_str = " • ".join(status_parts) if status_parts else "Connected"
-            parts.append(f"| {snapshot.provider} | {status_str} |")
+            if provider_idx < len(snapshots) - 1:
+                lines.append("")  # blank separator between providers
+            provider_idx += 1
+            parts.extend(lines)
 
-        parts.append("")
-        parts.append("Use `/usage` for active session details.")
+        if parts == ["📊 **Provider quota overview**"]:
+            return "No providers configured (no API keys found in env)."
+
+        parts.append("\nᅠ")
+        parts.append("Use `/usage` for active session token details.")
 
         return "\n".join(parts).strip()
 
