@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Optional
@@ -156,18 +157,6 @@ def build_nous_credits_snapshot(account_info) -> Optional[AccountUsageSnapshot]:
         windows: list[AccountUsageWindow] = []
         details: list[str] = []
 
-        # Subscription usage gauge — only when the portal supplies a positive
-        # monthly_credits denominator AND a finite remaining balance that does
-        # not exceed the cap. Money math is on float dollars (allowed: numeric
-        # account fields, NOT a server-provided *_usd string). used = cap -
-        # remaining; clamp [0,100] so a debt balance (remaining < 0) reads 100%.
-        # Excluded on purpose:
-        #   - non-finite values (NaN/Infinity slip past isinstance and json.loads
-        #     parses bare NaN/Infinity by default) → would render "$nan"/"$inf"
-        #     and a falsely-confident gauge;
-        #   - remaining > cap (rollover balance spanning the period) → monthly_credits
-        #     is no longer a meaningful denominator, and "$X of $Y left" with X>Y
-        #     reads as a contradiction. Both fall back to the magnitudes lines.
         if sub is not None:
             monthly_credits = getattr(sub, "monthly_credits", None)
             sub_remaining = getattr(sub, "credits_remaining", None)
@@ -243,7 +232,6 @@ def nous_credits_lines(*, markdown: bool = False, timeout: float = 10.0) -> list
     renders from that fixture instead of the real portal (so the block + gauge are
     testable without a live account). Throwaway scaffolding.
     """
-    # Dev fixture short-circuit — render /usage from the injected state, no portal.
     try:
         from agent.credits_tracker import dev_fixture_credits_state
 
@@ -274,20 +262,11 @@ def nous_credits_lines(*, markdown: bool = False, timeout: float = 10.0) -> list
         snapshot = build_nous_credits_snapshot(account)
         return render_account_usage_lines(snapshot, markdown=markdown)
     except Exception:
-        # Fail-open (caller shows nothing), but leave a breadcrumb so a dead
-        # /usage credits block is diagnosable in agent.log without a dev flag.
         logger.debug("credits ▸ /usage portal fetch/render failed (fail-open)", exc_info=True)
         return []
 
 
 def _snapshot_from_credits_state(state) -> Optional[AccountUsageSnapshot]:
-    """Map a header-shaped CreditsState (e.g. a dev fixture) to the /usage snapshot.
-
-    Renders the same magnitudes + monthly-grant % window the portal path produces,
-    so HERMES_DEV_CREDITS_FIXTURE can exercise /usage without a live account. The
-    *_usd strings are mock display values here (not server balance to compute on);
-    the % comes from CreditsState.used_fraction (micros math). Fail-open → None.
-    """
     try:
         if state is None:
             return None
@@ -340,14 +319,6 @@ def _snapshot_from_credits_state(state) -> Optional[AccountUsageSnapshot]:
 
 @dataclass(frozen=True)
 class CreditsView:
-    """Surface-agnostic data for the ``/credits`` command.
-
-    One portal fetch, one parse — consumed identically by the CLI panel, the
-    gateway button, and any other money surface. Fail-open: when not logged in
-    or the portal is unreachable, ``logged_in`` is False / ``topup_url`` is None
-    and callers degrade gracefully.
-    """
-
     logged_in: bool
     balance_lines: tuple[str, ...] = ()
     identity_line: Optional[str] = None
@@ -356,13 +327,6 @@ class CreditsView:
 
 
 def build_credits_view(*, markdown: bool = False, timeout: float = 10.0) -> CreditsView:
-    """Build the /credits view: balance block + identity line + top-up URL.
-
-    Reuses the same account fetch + snapshot + URL builder as the /usage credits
-    block, so the numbers always match. The balance block is the rendered
-    snapshot MINUS its trailing top-up/command-hint lines (the /credits surface
-    supplies its own affordance). Fail-open → ``CreditsView(logged_in=False)``.
-    """
     not_logged_in = CreditsView(logged_in=False)
     try:
         from hermes_cli.auth import get_provider_auth_state
@@ -393,9 +357,6 @@ def build_credits_view(*, markdown: bool = False, timeout: float = 10.0) -> Cred
         return not_logged_in
 
     snapshot = build_nous_credits_snapshot(account)
-    # Balance lines = the snapshot block minus the two trailing affordance lines
-    # ("Top up: <url>" + "(or run /credits)") that build_nous_credits_snapshot
-    # appends for the /usage surface. /credits renders its own button/panel.
     balance_lines: list[str] = []
     if snapshot is not None:
         rendered = render_account_usage_lines(snapshot, markdown=markdown)
@@ -406,7 +367,6 @@ def build_credits_view(*, markdown: bool = False, timeout: float = 10.0) -> Cred
             and not line.lstrip().startswith("(or run")
         ]
 
-    # Identity line — shown before any open (roadmap §4.4).
     email = getattr(account, "email", None)
     org_name = getattr(account, "org_name", None)
     who: list[str] = []
@@ -436,11 +396,44 @@ def _resolve_codex_usage_url(base_url: str) -> str:
     return normalized + "/api/codex/usage"
 
 
+def _resolve_codex_from_credential_pool() -> Optional[dict[str, str]]:
+    """Read Codex OAuth tokens from the new credential_pool format in auth.json."""
+    try:
+        from hermes_cli.auth import _load_auth_store
+
+        auth_store = _load_auth_store()
+        pool = auth_store.get("credential_pool") or {}
+        codex_entries = pool.get("openai-codex") or []
+        if not codex_entries:
+            return None
+        entry = codex_entries[0] if isinstance(codex_entries, list) else codex_entries
+        access_token = str(entry.get("access_token", "") or "").strip()
+        if not access_token:
+            return None
+        base_url = str(entry.get("base_url", "") or "").strip()
+        if not base_url:
+            base_url = "https://chatgpt.com/backend-api/codex"
+        return {
+            "provider": "openai-codex",
+            "base_url": base_url,
+            "api_key": access_token,
+            "source": "credential-pool",
+        }
+    except Exception:
+        return None
+
+
 def _fetch_codex_account_usage() -> Optional[AccountUsageSnapshot]:
-    creds = resolve_codex_runtime_credentials(refresh_if_expiring=True)
-    token_data = _read_codex_tokens()
-    tokens = token_data.get("tokens") or {}
-    account_id = str(tokens.get("account_id", "") or "").strip() or None
+    try:
+        creds = resolve_codex_runtime_credentials(refresh_if_expiring=True)
+        token_data = _read_codex_tokens()
+        tokens = token_data.get("tokens") or {}
+        account_id = str(tokens.get("account_id", "") or "").strip() or None
+    except Exception:
+        creds = _resolve_codex_from_credential_pool()
+        if not creds:
+            return None
+        account_id = None
     headers = {
         "Authorization": f"Bearer {creds['api_key']}",
         "Accept": "application/json",
@@ -617,6 +610,236 @@ def _fetch_openrouter_account_usage(base_url: Optional[str], api_key: Optional[s
     )
 
 
+def _fetch_deepseek_balance() -> Optional[AccountUsageSnapshot]:
+    api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
+    if not api_key:
+        return None
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+    }
+    with httpx.Client(timeout=10.0) as client:
+        response = client.get("https://api.deepseek.com/user/balance", headers=headers)
+        response.raise_for_status()
+    payload = response.json() or {}
+    details: list[str] = []
+    for info in payload.get("balance_infos") or []:
+        currency = str(info.get("currency") or "").upper()
+        total = info.get("total_balance", "0.00")
+        symbol = "¥" if currency == "CNY" else "$"
+        details.append(f"Balance ({currency}): {symbol}{total}")
+    if not details and payload.get("is_available") is not None:
+        details.append(f"Status: {'Available' if payload.get('is_available') else 'Low balance'}")
+    return AccountUsageSnapshot(
+        provider="deepseek",
+        source="balance_api",
+        fetched_at=_utc_now(),
+        details=tuple(details),
+    )
+
+
+def _fetch_antigravity_quota() -> Optional[AccountUsageSnapshot]:
+    try:
+        from agent import antigravity_oauth
+        from agent.antigravity_code_assist import retrieve_user_quota_antigravity
+    except ImportError as exc:
+        return AccountUsageSnapshot(
+            provider="google-antigravity", source="oauth_quota_api",
+            fetched_at=_utc_now(),
+            unavailable_reason=f"Antigravity modules unavailable: {exc}",
+        )
+    try:
+        access_token = antigravity_oauth.get_valid_access_token()
+    except Exception as exc:
+        return AccountUsageSnapshot(
+            provider="google-antigravity", source="oauth_quota_api",
+            fetched_at=_utc_now(),
+            unavailable_reason=f"Not logged in — run `hermes auth` ({exc})",
+        )
+    creds = antigravity_oauth.load_credentials()
+    project_id = (creds.project_id if creds else "") or ""
+    try:
+        buckets = retrieve_user_quota_antigravity(access_token, project_id=project_id)
+    except Exception as exc:
+        return AccountUsageSnapshot(
+            provider="google-antigravity", source="oauth_quota_api",
+            fetched_at=_utc_now(),
+            unavailable_reason=f"Quota lookup failed: {exc}",
+        )
+    if not buckets:
+        return AccountUsageSnapshot(
+            provider="google-antigravity", source="oauth_quota_api",
+            fetched_at=_utc_now(),
+            unavailable_reason="No quota buckets reported (free-tier or unmetered).",
+        )
+    _USER_FACING_PREFIXES = ("gemini-", "claude-", "gpt-")
+    details: list[str] = []
+    for b in sorted(buckets, key=lambda x: (x.model_id, x.token_type)):
+        if not b.model_id.startswith(_USER_FACING_PREFIXES):
+            continue
+        pct = int(round(b.remaining_fraction * 100))
+        label = b.model_id + (f" [{b.token_type}]" if b.token_type else "")
+        details.append(f"{label}: {pct}% remaining")
+    return AccountUsageSnapshot(
+        provider="google-antigravity", source="oauth_quota_api",
+        fetched_at=_utc_now(),
+        details=tuple(details),
+    )
+
+
+# ---------------------------------------------------------------------------
+# OpenCode Go dashboard scraping (for /quota)
+# ---------------------------------------------------------------------------
+
+_OPENCODE_GO_DASHBOARD_URL_PREFIX = "https://opencode.ai/workspace/"
+_OPENCODE_GO_DASHBOARD_URL_SUFFIX = "/go"
+_OPENCODE_GO_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Gecko/20100101 Firefox/148.0"
+
+
+def _parse_opencode_go_window(html: str, field: str) -> Optional[dict]:
+    """Parse SolidJS SSR hydration output for a usage window."""
+    import re
+    pct_first = re.compile(
+        rf'{field}:\$R\[\d+\]=\{{[^}}]*usagePercent:(-?\d+(?:\.\d+)?)[^}}]*resetInSec:(-?\d+(?:\.\d+)?)[^}}]*\}}'
+    )
+    reset_first = re.compile(
+        rf'{field}:\$R\[\d+\]=\{{[^}}]*resetInSec:(-?\d+(?:\.\d+)?)[^}}]*usagePercent:(-?\d+(?:\.\d+)?)[^}}]*\}}'
+    )
+    for m in (pct_first.search(html), reset_first.search(html)):
+        if not m:
+            continue
+        first = max(0.0, float(m.group(1)))
+        second = max(0.0, float(m.group(2)))
+        if m.re is pct_first:
+            return {"usagePercent": first, "resetInSec": second}
+        return {"usagePercent": second, "resetInSec": first}
+    return None
+
+
+def _fetch_opencode_go_quota() -> Optional[AccountUsageSnapshot]:
+    workspace_id = os.getenv("OPENCODE_GO_WORKSPACE_ID", "").strip()
+    auth_cookie = os.getenv("OPENCODE_GO_AUTH_COOKIE", "").strip()
+    if not workspace_id or not auth_cookie:
+        return None
+
+    from urllib.parse import quote
+    url = f"{_OPENCODE_GO_DASHBOARD_URL_PREFIX}{quote(workspace_id)}{_OPENCODE_GO_DASHBOARD_URL_SUFFIX}"
+    headers = {
+        "User-Agent": _OPENCODE_GO_USER_AGENT,
+        "Accept": "text/html",
+        "Cookie": f"auth={auth_cookie}",
+    }
+    try:
+        response = httpx.get(url, headers=headers, timeout=10.0, follow_redirects=True)
+        response.raise_for_status()
+    except Exception as exc:
+        return AccountUsageSnapshot(
+            provider="opencode-go", source="dashboard_scrape",
+            fetched_at=_utc_now(),
+            unavailable_reason=f"Dashboard scrape failed: {exc}",
+        )
+
+    html = response.text
+    windows_info = {}
+    now = datetime.now(timezone.utc)
+    for field, label in (("rollingUsage", "5h"), ("weeklyUsage", "Weekly"), ("monthlyUsage", "Monthly")):
+        parsed = _parse_opencode_go_window(html, field)
+        if parsed:
+            pct = int(round(parsed["usagePercent"]))
+            remaining = max(0, 100 - pct)
+            reset_dt = now.timestamp() + parsed["resetInSec"]
+            windows_info[label] = f"{remaining}% remaining ({pct}% used)"
+
+    if not windows_info:
+        return AccountUsageSnapshot(
+            provider="opencode-go", source="dashboard_scrape",
+            fetched_at=_utc_now(),
+            unavailable_reason="Could not parse OpenCode Go dashboard — verify WORKSPACE_ID and AUTH_COOKIE.",
+        )
+
+    details = [f"{label}: {info}" for label, info in windows_info.items()]
+    return AccountUsageSnapshot(
+        provider="opencode-go", source="dashboard_scrape",
+        fetched_at=_utc_now(),
+        details=tuple(details),
+    )
+
+
+# ---------------------------------------------------------------------------
+# GitHub Copilot OAuth quota (GET /copilot_internal/user)
+# ---------------------------------------------------------------------------
+
+_COPILOT_INTERNAL_USER_URL = "https://api.github.com/copilot_internal/user"
+
+
+def _fetch_copilot_quota() -> Optional[AccountUsageSnapshot]:
+    try:
+        from hermes_cli.auth import _load_auth_store
+        auth_store = _load_auth_store()
+        cp = auth_store.get("credential_pool") or {}
+        entries = cp.get("copilot") or []
+        if not entries:
+            return None
+        entry = entries[0] if isinstance(entries, list) else entries
+        token = (entry.get("access_token") or "").strip()
+        if not token:
+            return None
+    except Exception:
+        return None
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "User-Agent": "hermes-agent/1.0",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    try:
+        response = httpx.get(_COPILOT_INTERNAL_USER_URL, headers=headers, timeout=10.0)
+        response.raise_for_status()
+        data = response.json() or {}
+    except Exception as exc:
+        return AccountUsageSnapshot(
+            provider="github-copilot", source="internal_user_api",
+            fetched_at=_utc_now(),
+            unavailable_reason=f"Quota fetch failed: {exc}",
+        )
+
+    chat = data.get("chat") or {}
+    remaining = chat.get("remaining")
+    limit = chat.get("limit")
+    windows: list[AccountUsageWindow] = []
+    details: list[str] = []
+
+    if isinstance(remaining, (int, float)) and isinstance(limit, (int, float)) and limit > 0:
+        used_pct = max(0.0, (1.0 - float(remaining) / float(limit)) * 100)
+        windows.append(AccountUsageWindow(
+            label="Copilot Chat",
+            used_percent=used_pct,
+            detail=f"{int(remaining)}/{int(limit)} remaining",
+        ))
+    else:
+        chat_premium = data.get("chat_premium_enabled")
+        individual = data.get("individual") or {}
+        if chat_premium or individual.get("plan") in ("pro", "pro+"):
+            details.append("Copilot Chat: active (unlimited or pro plan)")
+        else:
+            plan = individual.get("plan", "free")
+            details.append(f"Copilot plan: {plan}")
+
+    return AccountUsageSnapshot(
+        provider="github-copilot",
+        source="internal_user_api",
+        fetched_at=_utc_now(),
+        windows=tuple(windows),
+        details=tuple(details),
+    )
+
+
+# =========================================================================
+# Single-provider fetch (for /usage)
+# =========================================================================
+
+
 def fetch_account_usage(
     provider: Optional[str],
     *,
@@ -633,6 +856,126 @@ def fetch_account_usage(
             return _fetch_anthropic_account_usage()
         if normalized == "openrouter":
             return _fetch_openrouter_account_usage(base_url, api_key)
+        if normalized == "deepseek":
+            return _fetch_deepseek_balance()
+        if normalized == "google-antigravity":
+            return _fetch_antigravity_quota()
     except Exception:
         return None
     return None
+
+
+# =========================================================================
+# fetch_all_providers_quota — for /quota command
+# =========================================================================
+
+_QUOTA_FETCHERS: list[tuple[str, str, callable]] = [
+    ("DEEPSEEK_API_KEY",    "deepseek",    lambda: _fetch_deepseek_balance()),
+    ("OPENROUTER_API_KEY",  "openrouter",  lambda: _fetch_openrouter_account_usage(None, None)),
+    ("ANTHROPIC_API_KEY",   "anthropic",   lambda: _fetch_anthropic_account_usage()),
+]
+
+_SCRAPE_FETCHERS: list[tuple[str, str, list[str], callable]] = [
+    ("opencode-go", "opencode-go", ["OPENCODE_GO_WORKSPACE_ID", "OPENCODE_GO_AUTH_COOKIE"],
+     lambda: _fetch_opencode_go_quota()),
+]
+
+_OAUTH_QUOTA_FETCHERS: list[tuple[str, callable]] = [
+    ("openai-codex",       lambda: _fetch_codex_account_usage()),
+    ("google-antigravity", lambda: _fetch_antigravity_quota()),
+]
+
+_KEY_ONLY_PROVIDERS: list[tuple[str, str, str]] = [
+    ("DASHSCOPE_API_KEY",     "alibaba",                "Alibaba DashScope — quota N/A via API"),
+    ("MINIMAX_API_KEY",       "minimax",                "MiniMax — quota N/A via API"),
+]
+
+
+def fetch_all_providers_quota() -> list[AccountUsageSnapshot]:
+    """Fetch quota/balance for every configured provider.
+
+    - API-key providers: detected via env vars
+    - OAuth providers (openai-codex, google-antigravity): always attempted,
+      return unavailable_reason if not logged in (non-fatal)
+    - Key-only providers: listed with unavailable_reason if key is set
+    """
+    results: list[AccountUsageSnapshot] = []
+
+    for env_key, provider_id, fetcher in _QUOTA_FETCHERS:
+        if not os.getenv(env_key, "").strip():
+            continue
+        try:
+            snapshot = fetcher()
+        except Exception:
+            snapshot = None
+        if snapshot is not None:
+            results.append(snapshot)
+
+    for provider_id, fetcher in _OAUTH_QUOTA_FETCHERS:
+        try:
+            snapshot = fetcher()
+        except Exception:
+            snapshot = None
+        if snapshot is not None:
+            results.append(snapshot)
+
+    for provider_id, label, env_vars, fetcher in _SCRAPE_FETCHERS:
+        if not all(os.getenv(v, "").strip() for v in env_vars):
+            continue
+        try:
+            snapshot = fetcher()
+        except Exception:
+            snapshot = None
+        if snapshot is not None:
+            results.append(snapshot)
+
+    for env_key, provider_id, reason in _KEY_ONLY_PROVIDERS:
+        env_present = bool(os.getenv(env_key, "").strip()) if env_key else False
+        if not env_present:
+            continue
+        results.append(AccountUsageSnapshot(
+            provider=provider_id,
+            source="env_detected",
+            fetched_at=_utc_now(),
+            unavailable_reason=reason,
+        ))
+
+    # Credential-pool detected providers
+    _CREDENTIAL_POOL_KEY_ONLY = ["cursor", "zai", "kimi-for-coding", "alibaba-coding-plan"]
+    _CREDENTIAL_POOL_FETCHERS = [
+        ("copilot", lambda: _fetch_copilot_quota()),
+    ]
+    try:
+        from hermes_cli.auth import _load_auth_store
+        auth_store = _load_auth_store()
+        cp = auth_store.get("credential_pool") or {}
+
+        for provider_id, fetcher in _CREDENTIAL_POOL_FETCHERS:
+            entries = cp.get(provider_id)
+            if not entries or not (isinstance(entries, list) and len(entries) > 0):
+                continue
+            e = entries[0]
+            if e.get("access_token") and not e.get("last_error_reason"):
+                try:
+                    snapshot = fetcher()
+                except Exception:
+                    snapshot = None
+                if snapshot is not None:
+                    results.append(snapshot)
+
+        for provider_id in _CREDENTIAL_POOL_KEY_ONLY:
+            entries = cp.get(provider_id)
+            if not entries or not (isinstance(entries, list) and len(entries) > 0):
+                continue
+            e = entries[0]
+            if e.get("access_token") and not e.get("last_error_reason"):
+                results.append(AccountUsageSnapshot(
+                    provider=provider_id,
+                    source="credential_pool",
+                    fetched_at=_utc_now(),
+                    unavailable_reason="Quota via OAuth only — not yet implemented",
+                ))
+    except Exception:
+        pass
+
+    return results
