@@ -3366,10 +3366,41 @@ class GatewaySlashCommandsMixin:
             return "No providers configured (no API keys found in env)."
 
         parts: list[str] = ["📊 **Provider quota overview**", ""]
+        
+        # Build a markdown table for better alignment in Telegram
+        parts.append("| Provider | Status / Quota |")
+        parts.append("| :--- | :--- |")
+        
         for snapshot in snapshots:
-            lines = render_account_usage_lines(snapshot, markdown=True)
-            parts.extend(lines)
-            parts.append("")
+            # We want a compact summary for the table
+            status_parts = []
+            if snapshot.unavailable_reason:
+                status_parts.append(f"❌ {snapshot.unavailable_reason}")
+            
+            # Add main window percent if available
+            for window in snapshot.windows:
+                if window.used_percent is not None:
+                    status_parts.append(f"{max(0, round(100 - float(window.used_percent)))}% left")
+                    break # Take first window for table summary
+            
+            # Add details if status_parts still empty
+            if not status_parts:
+                for detail in snapshot.details:
+                    # Clean WTUS or other technical prefixes for the table
+                    clean_detail = detail.split(":")[0].strip()
+                    if "% remaining" in detail:
+                        pct = detail.split(":")[1].split("%")[0].strip()
+                        status_parts.append(f"{pct}% ({clean_detail})")
+                        break # Just first one
+                    else:
+                        status_parts.append(detail)
+                        break
+
+            status_str = " • ".join(status_parts) if status_parts else "Connected"
+            parts.append(f"| {snapshot.provider} | {status_str} |")
+
+        parts.append("")
+        parts.append("Use `/usage` for active session details.")
 
         return "\n".join(parts).strip()
 

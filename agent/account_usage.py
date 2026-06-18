@@ -657,7 +657,10 @@ def _fetch_antigravity_quota() -> Optional[AccountUsageSnapshot]:
             unavailable_reason=f"Not logged in — run `hermes auth` ({exc})",
         )
     creds = antigravity_oauth.load_credentials()
-    project_id = (creds.project_id if creds else "") or ""
+    # AntigravityCredentials doesn't have a root project_id; check top_level_extras
+    project_id = ""
+    if creds:
+        project_id = str(creds.top_level_extras.get("project_id", "") or "").strip()
     try:
         buckets = retrieve_user_quota_antigravity(access_token, project_id=project_id)
     except Exception as exc:
