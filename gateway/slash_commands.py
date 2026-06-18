@@ -29,7 +29,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional, Union
 
-from agent.account_usage import fetch_account_usage, render_account_usage_lines
+from agent.account_usage import fetch_account_usage, fetch_all_providers_quota, render_account_usage_lines
 from agent.i18n import t
 from gateway.config import HomeChannel, Platform, PlatformConfig
 from gateway.platforms.base import EphemeralReply, MessageEvent, MessageType
@@ -3354,6 +3354,24 @@ class GatewaySlashCommandsMixin:
                 parts.extend(credits_lines)
             return "\n".join(parts)
         return t("gateway.usage.no_data")
+
+    async def _handle_quota_command(self, event: MessageEvent) -> str:
+        """Handle /quota command -- show quota/balance for all configured providers."""
+        try:
+            snapshots = await asyncio.to_thread(fetch_all_providers_quota)
+        except Exception as exc:
+            return f"Quota lookup failed: {exc}"
+
+        if not snapshots:
+            return "No providers configured (no API keys found in env)."
+
+        parts: list[str] = ["📊 **Provider quota overview**", ""]
+        for snapshot in snapshots:
+            lines = render_account_usage_lines(snapshot, markdown=True)
+            parts.extend(lines)
+            parts.append("")
+
+        return "\n".join(parts).strip()
 
     async def _handle_insights_command(self, event: MessageEvent) -> str:
         """Handle /insights command -- show usage insights and analytics."""
