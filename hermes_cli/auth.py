@@ -143,6 +143,10 @@ SERVICE_PROVIDER_NAMES: Dict[str, str] = {
     "spotify": "Spotify",
 }
 
+# Google Antigravity OAuth (Antigravity Code Assist backend). Local/personal
+# provider restored for users who explicitly want to reuse their agy CLI login.
+DEFAULT_ANTIGRAVITY_CLOUDCODE_BASE_URL = "antigravity-pa://google"
+
 # LM Studio's default no-auth mode still requires *some* non-empty bearer for
 # the API-key code paths (auxiliary_client, runtime resolver) to treat the
 # provider as configured. This sentinel is sent only to LM Studio, never to
@@ -206,6 +210,12 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         name="Qwen OAuth",
         auth_type="oauth_external",
         inference_base_url=DEFAULT_QWEN_BASE_URL,
+    ),
+    "google-antigravity": ProviderConfig(
+        id="google-antigravity",
+        name="Google Antigravity (OAuth)",
+        auth_type="oauth_external",
+        inference_base_url=DEFAULT_ANTIGRAVITY_CLOUDCODE_BASE_URL,
     ),
     "lmstudio": ProviderConfig(
         id="lmstudio",
@@ -1622,6 +1632,9 @@ def resolve_provider(
         "github-copilot-acp": "copilot-acp", "copilot-acp-agent": "copilot-acp",
         "opencode": "opencode-zen", "zen": "opencode-zen",
         "qwen-portal": "qwen-oauth", "qwen-cli": "qwen-oauth", "qwen-oauth": "qwen-oauth",
+        "google-antigravity": "google-antigravity", "google-antigravity-oauth": "google-antigravity",
+        "antigravity": "google-antigravity", "antigravity-oauth": "google-antigravity",
+        "antigravity-cli": "google-antigravity", "agy": "google-antigravity", "agy-cli": "google-antigravity",
         "hf": "huggingface", "hugging-face": "huggingface", "huggingface-hub": "huggingface",
         "mimo": "xiaomi", "xiaomi-mimo": "xiaomi",
         "tencent": "tencent-tokenhub", "tokenhub": "tencent-tokenhub",
@@ -2337,6 +2350,72 @@ def get_qwen_auth_status() -> Dict[str, Any]:
             "auth_file": str(auth_path),
             "error": str(exc),
         }
+
+
+def resolve_antigravity_oauth_runtime_credentials(
+    *,
+    force_refresh: bool = False,
+) -> Dict[str, Any]:
+    """Resolve runtime OAuth creds for google-antigravity from the agy/Antigravity CLI token."""
+    try:
+        from agent.antigravity_oauth import (
+            AntigravityOAuthError,
+            _credentials_path,
+            get_valid_access_token,
+            load_credentials,
+        )
+    except ImportError as exc:
+        raise AuthError(
+            f"agent.antigravity_oauth is not importable: {exc}",
+            provider="google-antigravity",
+            code="antigravity_oauth_module_missing",
+        ) from exc
+
+    try:
+        access_token = get_valid_access_token(force_refresh=force_refresh)
+    except AntigravityOAuthError as exc:
+        raise AuthError(
+            str(exc),
+            provider="google-antigravity",
+            code=exc.code,
+        ) from exc
+
+    creds = load_credentials()
+    return {
+        "provider": "google-antigravity",
+        "base_url": DEFAULT_ANTIGRAVITY_CLOUDCODE_BASE_URL,
+        "api_key": access_token,
+        "source": "antigravity-oauth",
+        "expires_at_ms": (creds.expires_ms if creds else None),
+        "auth_file": str(_credentials_path()),
+        "email": (creds.email if creds else "") or "",
+        "project_id": (creds.project_id if creds else "") or "",
+    }
+
+
+def get_antigravity_oauth_auth_status() -> Dict[str, Any]:
+    """Return a status dict for `hermes auth list` / `hermes status`."""
+    try:
+        from agent.antigravity_oauth import _credentials_path, load_credentials
+    except ImportError:
+        return {"logged_in": False, "error": "agent.antigravity_oauth unavailable"}
+    auth_path = _credentials_path()
+    creds = load_credentials()
+    if creds is None or not creds.access_token:
+        return {
+            "logged_in": False,
+            "auth_file": str(auth_path),
+            "error": "not logged in",
+        }
+    return {
+        "logged_in": True,
+        "auth_file": str(auth_path),
+        "source": "antigravity-oauth",
+        "api_key": creds.access_token,
+        "expires_at_ms": creds.expires_ms,
+        "email": creds.email,
+        "project_id": creds.project_id,
+    }
 
 
 # =============================================================================
@@ -6331,6 +6410,8 @@ def get_auth_status(provider_id: Optional[str] = None) -> Dict[str, Any]:
         return get_xai_oauth_auth_status()
     if target == "qwen-oauth":
         return get_qwen_auth_status()
+    if target == "google-antigravity":
+        return get_antigravity_oauth_auth_status()
     if target == "minimax-oauth":
         return get_minimax_oauth_auth_status()
     if target == "copilot-acp":

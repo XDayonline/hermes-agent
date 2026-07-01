@@ -27,6 +27,7 @@ from hermes_cli.auth import (
     resolve_codex_runtime_credentials,
     resolve_xai_oauth_runtime_credentials,
     resolve_qwen_runtime_credentials,
+    resolve_antigravity_oauth_runtime_credentials,
     resolve_api_key_provider_credentials,
     resolve_external_process_provider_credentials,
     has_usable_secret,
@@ -414,6 +415,9 @@ def _resolve_runtime_from_pool_entry(
     elif provider == "qwen-oauth":
         api_mode = "chat_completions"
         base_url = base_url or DEFAULT_QWEN_BASE_URL
+    elif provider == "google-antigravity":
+        api_mode = "chat_completions"
+        base_url = base_url or "antigravity-pa://google"
     elif provider == "minimax-oauth":
         # MiniMax OAuth tokens are valid only against the Anthropic Messages
         # compatible endpoint. Do not honor stale model.api_mode values from a
@@ -1381,6 +1385,32 @@ def _resolve_explicit_runtime(
             "requested_provider": requested_provider,
         }
 
+    if provider == "google-antigravity":
+        base_url = explicit_base_url or "antigravity-pa://google"
+        api_key = explicit_api_key
+        expires_at_ms = None
+        email = ""
+        project_id = ""
+        if not api_key:
+            creds = resolve_antigravity_oauth_runtime_credentials()
+            api_key = creds.get("api_key", "")
+            expires_at_ms = creds.get("expires_at_ms")
+            email = creds.get("email", "")
+            project_id = creds.get("project_id", "")
+            if not explicit_base_url:
+                base_url = creds.get("base_url", "") or base_url
+        return {
+            "provider": "google-antigravity",
+            "api_mode": "chat_completions",
+            "base_url": base_url,
+            "api_key": api_key,
+            "source": "explicit",
+            "expires_at_ms": expires_at_ms,
+            "email": email,
+            "project_id": project_id,
+            "requested_provider": requested_provider,
+        }
+
     if provider == "nous":
         state = auth_mod.get_provider_auth_state("nous") or {}
         base_url = (
@@ -1755,6 +1785,25 @@ def resolve_runtime_provider(
                 raise
             logger.info("Qwen OAuth credentials failed; "
                         "falling through to next provider.")
+
+    if provider == "google-antigravity":
+        try:
+            creds = resolve_antigravity_oauth_runtime_credentials()
+            return {
+                "provider": "google-antigravity",
+                "api_mode": "chat_completions",
+                "base_url": creds.get("base_url", "") or "antigravity-pa://google",
+                "api_key": creds.get("api_key", ""),
+                "source": creds.get("source", "antigravity-oauth"),
+                "expires_at_ms": creds.get("expires_at_ms"),
+                "email": creds.get("email", ""),
+                "project_id": creds.get("project_id", ""),
+                "requested_provider": requested_provider,
+            }
+        except AuthError:
+            if requested_provider != "auto":
+                raise
+            logger.info("Antigravity OAuth credentials failed; falling through to next provider.")
 
     if provider == "minimax-oauth":
         pconfig = PROVIDER_REGISTRY.get(provider)
