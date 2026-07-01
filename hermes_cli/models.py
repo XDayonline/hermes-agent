@@ -266,6 +266,16 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "gemini-3.5-flash",
         "gemini-3.1-flash-lite-preview",
     ],
+    "google-antigravity": [
+        "gemini-3.5-flash-low",
+        "gemini-3.5-flash-medium",
+        "gemini-3.5-flash-high",
+        "gemini-3.1-pro-low",
+        "gemini-3.1-pro-high",
+        "gemini-pro-agent",
+        "claude-sonnet-4-6",
+        "claude-opus-4-6-thinking",
+    ],
     "zai": [
         "glm-5.2",
         "glm-5.1",
@@ -1032,6 +1042,7 @@ CANONICAL_PROVIDERS: list[ProviderEntry] = [
     ProviderEntry("copilot-acp",    "GitHub Copilot ACP",       "GitHub Copilot ACP (Spawns copilot --acp --stdio)"),
     ProviderEntry("huggingface",    "Hugging Face",             "Hugging Face Inference Providers"),
     ProviderEntry("gemini",         "Google AI Studio",         "Google AI Studio (Native Gemini API)"),
+    ProviderEntry("google-antigravity", "Google Antigravity (OAuth)", "Google Antigravity via agy CLI OAuth (Gemini/Claude where entitled)"),
     ProviderEntry("deepseek",       "DeepSeek",                 "DeepSeek (V3, R1, coder, direct API)"),
     ProviderEntry("xai",            "xAI",                      "xAI Grok (Direct API)"),
     ProviderEntry("zai",            "Z.AI / GLM",               "Z.AI / GLM (Zhipu direct API)"),
@@ -1223,6 +1234,12 @@ _PROVIDER_ALIASES = {
     "qwen": "alibaba",
     "alibaba-cloud": "alibaba",
     "qwen-portal": "qwen-oauth",
+    "antigravity": "google-antigravity",
+    "antigravity-oauth": "google-antigravity",
+    "antigravity-cli": "google-antigravity",
+    "google-antigravity-oauth": "google-antigravity",
+    "agy": "google-antigravity",
+    "agy-cli": "google-antigravity",
     "hf": "huggingface",
     "hugging-face": "huggingface",
     "huggingface-hub": "huggingface",
@@ -2243,6 +2260,22 @@ def _merge_with_models_dev(provider: str, curated: list[str]) -> list[str]:
     return merged
 
 
+def _fetch_antigravity_models(*, force_refresh: bool = False) -> list[str]:
+    """Fetch the live model list from the local agy/Antigravity OAuth account."""
+    try:
+        from agent import antigravity_oauth
+        from agent.antigravity_code_assist import (
+            fetch_available_models_with_fallbacks,
+            parse_agent_model_ids,
+        )
+
+        access_token = antigravity_oauth.get_valid_access_token(force_refresh=force_refresh)
+        payload = fetch_available_models_with_fallbacks(access_token)
+        return parse_agent_model_ids(payload)
+    except Exception:
+        return []
+
+
 def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) -> list[str]:
     """Return the best known model catalog for a provider.
 
@@ -2273,6 +2306,11 @@ def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) 
         return get_codex_model_ids(access_token=access_token)
     if normalized == "xai-oauth":
         return list(_PROVIDER_MODELS.get("xai-oauth", _PROVIDER_MODELS.get("xai", [])))
+    if normalized == "google-antigravity":
+        live = _fetch_antigravity_models(force_refresh=force_refresh)
+        if live:
+            return live
+        return list(_PROVIDER_MODELS.get("google-antigravity", []))
     if normalized in {"copilot", "copilot-acp"}:
         try:
             live = _fetch_github_models(_resolve_copilot_catalog_api_key())

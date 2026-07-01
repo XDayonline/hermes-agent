@@ -638,9 +638,27 @@ def _fetch_deepseek_balance() -> Optional[AccountUsageSnapshot]:
     )
 
 
-def _fetch_antigravity_quota() -> Optional[AccountUsageSnapshot]:
+def _load_antigravity_oauth_token() -> Optional[dict]:
+    """Return Antigravity access token/project for /quota tests and runtime."""
     try:
         from agent import antigravity_oauth
+
+        access_token = antigravity_oauth.get_valid_access_token()
+        creds = antigravity_oauth.load_credentials()
+        project_id = ""
+        if creds:
+            project_id = str(
+                getattr(creds, "project_id", "")
+                or getattr(creds, "top_level_extras", {}).get("project_id", "")
+                or ""
+            ).strip()
+        return {"access": access_token, "project_id": project_id}
+    except Exception:
+        return None
+
+
+def _fetch_antigravity_quota() -> Optional[AccountUsageSnapshot]:
+    try:
         from agent.antigravity_code_assist import retrieve_user_quota_antigravity
     except ImportError as exc:
         return AccountUsageSnapshot(
@@ -648,19 +666,15 @@ def _fetch_antigravity_quota() -> Optional[AccountUsageSnapshot]:
             fetched_at=_utc_now(),
             unavailable_reason=f"Antigravity modules unavailable: {exc}",
         )
-    try:
-        access_token = antigravity_oauth.get_valid_access_token()
-    except Exception as exc:
+    token_info = _load_antigravity_oauth_token()
+    if not token_info:
         return AccountUsageSnapshot(
             provider="google-antigravity", source="oauth_quota_api",
             fetched_at=_utc_now(),
-            unavailable_reason=f"Not logged in — run `hermes auth` ({exc})",
+            unavailable_reason="Not logged in — run `agy` login / install flow",
         )
-    creds = antigravity_oauth.load_credentials()
-    # AntigravityCredentials doesn't have a root project_id; check top_level_extras
-    project_id = ""
-    if creds:
-        project_id = str(creds.top_level_extras.get("project_id", "") or "").strip()
+    access_token = str(token_info.get("access") or "").strip()
+    project_id = str(token_info.get("project_id") or "").strip()
     try:
         buckets = retrieve_user_quota_antigravity(access_token, project_id=project_id)
     except Exception as exc:
