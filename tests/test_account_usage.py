@@ -284,7 +284,8 @@ def test_fetch_account_usage_antigravity_with_quota(monkeypatch):
 
     assert snapshot is not None
     assert snapshot.provider == "google-antigravity"
-    assert any("gemini-pro-agent" in d for d in snapshot.details)
+    assert any("Gemini" in d for d in snapshot.details)
+    assert any("Claude" in d for d in snapshot.details)
     assert any("75%" in d for d in snapshot.details)
     assert any("50%" in d for d in snapshot.details)
 

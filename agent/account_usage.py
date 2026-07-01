@@ -23,6 +23,15 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _progress_bar(pct: float, *, width: int = 24) -> str:
+    """Return an ASCII progress bar like  ████████████░░░░░░░░░░   60%."""
+    pct = max(0.0, min(100.0, float(pct)))
+    filled = round(pct / 100.0 * width)
+    empty = width - filled
+    bar = "█" * filled + "░" * empty
+    return f"{bar}  {round(pct)}% left"
+
+
 @dataclass(frozen=True)
 class AccountUsageWindow:
     label: str
@@ -690,13 +699,29 @@ def _fetch_antigravity_quota() -> Optional[AccountUsageSnapshot]:
             unavailable_reason="No quota buckets reported (free-tier or unmetered).",
         )
     _USER_FACING_PREFIXES = ("gemini-", "claude-", "gpt-")
-    details: list[str] = []
+    # Group by model family for a cleaner display
+    families: dict[str, list[tuple[str, float]]] = {}
     for b in sorted(buckets, key=lambda x: (x.model_id, x.token_type)):
         if not b.model_id.startswith(_USER_FACING_PREFIXES):
             continue
-        pct = int(round(b.remaining_fraction * 100))
-        label = b.model_id + (f" [{b.token_type}]" if b.token_type else "")
-        details.append(f"{label}: {pct}% remaining")
+        # Extract family name: "gemini", "claude", "gpt"
+        family = b.model_id.split("-")[0]
+        families.setdefault(family, []).append(
+            (b.model_id, b.remaining_fraction)
+        )
+
+    details: list[str] = []
+    for family in sorted(families.keys()):
+        members = families[family]
+        # All members in a family share the same remaining % in practice
+        pct = int(round(members[0][1] * 100))
+        bar = _progress_bar(pct)
+        if family == "gpt":
+            label = "GPT OSS"
+        else:
+            label = family.capitalize()
+        details.append(f"{label}")
+        details.append(f"  {bar}")
     return AccountUsageSnapshot(
         provider="google-antigravity", source="oauth_quota_api",
         fetched_at=_utc_now(),
