@@ -114,15 +114,19 @@ def render_account_usage_lines(snapshot: Optional[AccountUsageSnapshot], *, mark
     for window in snapshot.windows:
         if window.used_percent is None:
             base = f"{window.label}: unavailable"
+            if window.detail:
+                base += f" • {window.detail}"
+            lines.append(base)
         else:
             remaining = max(0, round(100 - float(window.used_percent)))
             used = max(0, round(float(window.used_percent)))
-            base = f"{window.label}: {remaining}% remaining ({used}% used)"
-        if window.reset_at:
-            base += f" • resets {_format_reset(window.reset_at)}"
-        elif window.detail:
-            base += f" • {window.detail}"
-        lines.append(base)
+            bar = _progress_bar(remaining)
+            lines.append(f"{window.label}")
+            lines.append(f"  {bar}")
+            if window.reset_at:
+                lines.append(f"  Resets {_format_reset(window.reset_at)}")
+            elif window.detail:
+                lines.append(f"  {window.detail}")
     for detail in snapshot.details:
         lines.append(detail)
     if snapshot.unavailable_reason:
