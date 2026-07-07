@@ -588,6 +588,7 @@ ANTIGRAVITY_MODEL_ALIASES = {
     "gemini-3.5-flash-medium": "gemini-3.5-flash-low",
     "gemini-3.5-flash-high": "gemini-3-flash-agent",
     "gemini-3.5-flash-preview": "gemini-3-flash-agent",
+    "gemini-3.1-pro-high": "gemini-pro-agent",
 }
 
 
