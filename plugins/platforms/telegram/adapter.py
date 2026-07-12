@@ -5158,6 +5158,7 @@ class TelegramAdapter(BasePlatformAdapter):
             return f'(search failed to render: {e})'
         return None  # we already sent the message
 
+    _PROVIDER_PAGE_SIZE = 10
     _MODEL_PAGE_SIZE = 8
 
     def _build_provider_keyboard(self, providers: list, page: int = 0) -> tuple:
