@@ -68,6 +68,29 @@ def _make_runner(session_key, agent=None, cached_agent=None):
 SK = "agent:main:telegram:private:12345"
 
 
+class TestQuotaCommand:
+    @pytest.mark.asyncio
+    async def test_quota_command_renders_provider_snapshots(self, monkeypatch):
+        from agent.account_usage import AccountUsageSnapshot
+
+        runner = _make_runner(SK)
+        event = MagicMock()
+        snapshot = AccountUsageSnapshot(
+            provider="google-antigravity",
+            source="oauth_models_api",
+            fetched_at=MagicMock(),
+            details=("Claude", "  50% left"),
+        )
+
+        monkeypatch.setattr("gateway.slash_commands.fetch_all_providers_quota", lambda: [snapshot])
+
+        result = await runner._handle_quota_command(event)
+
+        assert "📈 **Account limits**" in result
+        assert "Provider: google-antigravity" in result
+        assert "Claude" in result
+
+
 class TestUsageCachedAgent:
     """The main fix: /usage should find agents in _agent_cache between turns."""
 
