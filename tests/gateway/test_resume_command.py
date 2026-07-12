@@ -115,6 +115,51 @@ class TestHandleResumeCommand:
         db.close()
 
     @pytest.mark.asyncio
+    async def test_telegram_owner_can_resume_across_forum_threads(self, tmp_path):
+        """A Telegram user may deliberately resume their own work from another topic."""
+        from hermes_state import SessionDB
+
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session(
+            "previous_topic_session",
+            "telegram",
+            user_id="12345",
+            chat_id="67890",
+            chat_type="group",
+            thread_id="other-topic",
+        )
+        db.set_session_title("previous_topic_session", "Previous topic")
+        db.create_session(
+            "current_session_001",
+            "telegram",
+            user_id="12345",
+            chat_id="67890",
+            chat_type="group",
+            thread_id="this-topic",
+        )
+        event = MessageEvent(
+            text="/resume Previous topic",
+            source=SessionSource(
+                platform=Platform.TELEGRAM,
+                user_id="12345",
+                chat_id="67890",
+                chat_type="group",
+                thread_id="this-topic",
+            ),
+        )
+        runner = _make_runner(
+            session_db=db,
+            current_session_id="current_session_001",
+            event=event,
+        )
+
+        result = await runner._handle_resume_command(event)
+
+        assert "Resumed" in result
+        assert runner.session_store.switch_session.call_args[0][1] == "previous_topic_session"
+        db.close()
+
+    @pytest.mark.asyncio
     async def test_resume_by_index(self, tmp_path):
         """Numeric argument resumes the indexed titled session from the list."""
         from hermes_state import SessionDB

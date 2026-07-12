@@ -783,6 +783,26 @@ class GatewaySlashCommandsMixin:
         """
         if allow_override and self._resume_caller_is_admin(source):
             return True
+
+        # Telegram users may deliberately resume their own conversation from a
+        # different forum topic in the SAME chat. Topics isolate live agent
+        # state, but must not turn the personal /resume picker into a dead end.
+        # The ownership boundary remains intact: both sides must prove the same
+        # non-empty Telegram user id and chat id.
+        caller_uid = str(getattr(source, "user_id", "") or "")
+
+        def _same_telegram_owner(origin: Optional[SessionSource]) -> bool:
+            return bool(
+                source.platform == Platform.TELEGRAM
+                and isinstance(origin, SessionSource)
+                and origin.platform == Platform.TELEGRAM
+                and caller_uid
+                and str(getattr(source, "chat_id", "") or "")
+                and str(getattr(origin, "chat_id", "") or "")
+                == str(getattr(source, "chat_id", "") or "")
+                and str(getattr(origin, "user_id", "") or "") == caller_uid
+            )
+
         # Use the live origin only when it resolves to a real SessionSource; a
         # store that can't resolve it (or an unexpected lookup error) must not
         # silently allow/deny — fall through to the deterministic DB scoping.
@@ -791,6 +811,8 @@ class GatewaySlashCommandsMixin:
         except Exception:
             origin = None
         if isinstance(origin, SessionSource):
+            if _same_telegram_owner(origin):
+                return True
             return self._same_origin_chat(source, origin)
         # Inactive/persisted-only: best-effort scope by DB row source + user.
         try:
@@ -803,6 +825,16 @@ class GatewaySlashCommandsMixin:
             return False  # different platform / source
         caller_uid = str(getattr(source, "user_id", "") or "")
         row_uid = str(row.get("user_id") or "")
+        if (
+            source.platform == Platform.TELEGRAM
+            and caller_uid
+            and row_uid == caller_uid
+            and str(row_src or "") == Platform.TELEGRAM.value
+            and str(getattr(source, "chat_id", "") or "")
+            and str(row.get("chat_id") or "")
+            == str(getattr(source, "chat_id", "") or "")
+        ):
+            return True
         # Chat/thread origin recorded at session creation (see
         # SessionDB._insert_session_row). The sessions table historically stored
         # only source + user_id, so a same-user row could belong to a DIFFERENT
@@ -3535,7 +3567,14 @@ class GatewaySlashCommandsMixin:
                 and getattr(type(adapter), "send_sessions_picker", None) is not None
             ):
                 try:
-                    picker_sessions = await _list_titled_sessions(limit=50)
+                    # The inline picker can label untitled sessions from their
+                    # preview. Restricting it to manually titled rows made fresh
+                    # Telegram conversations disappear from /resume.
+                    picker_sessions = await self._session_db.list_sessions_rich(
+                        source=source.platform.value if source.platform else None,
+                        limit=50,
+                        order_by_last_active=True,
+                    )
                     picker_sessions = [
                         s for s in picker_sessions
                         if await self._resume_row_visible(source, s, allow_all)
