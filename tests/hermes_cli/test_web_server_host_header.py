@@ -83,6 +83,20 @@ class TestHostHeaderValidator:
         assert _is_accepted_host("LOCALHOST", "127.0.0.1")
         assert _is_accepted_host("LocalHost:9119", "127.0.0.1")
 
+    def test_loopback_bind_accepts_explicit_reverse_proxy_hosts(self, monkeypatch):
+        """Loopback-bound dashboards may opt into exact tunnel hostnames."""
+        import hermes_cli.web_server as ws
+
+        monkeypatch.setattr(
+            ws,
+            "_EXTERNAL_ALLOWED_HOSTS",
+            frozenset({"dashboard.example.test"}),
+        )
+
+        assert ws._is_accepted_host("dashboard.example.test", "127.0.0.1")
+        assert ws._is_accepted_host("dashboard.example.test:443", "127.0.0.1")
+        assert not ws._is_accepted_host("evil.example.test", "127.0.0.1")
+
 
 class TestHostHeaderMiddleware:
     """End-to-end test via the FastAPI app — verify the middleware

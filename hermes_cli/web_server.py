@@ -383,6 +383,14 @@ def _require_token(request: Request) -> None:
 _LOOPBACK_HOST_VALUES: frozenset = frozenset({
     "localhost", "127.0.0.1", "::1",
 })
+# Explicit hostnames permitted when the dashboard stays bound to loopback
+# behind a trusted reverse proxy / Cloudflare Tunnel. This remains opt-in,
+# avoiding a wildcard bypass of the DNS-rebinding guard.
+_EXTERNAL_ALLOWED_HOSTS: frozenset = frozenset(
+    host.strip().lower()
+    for host in os.environ.get("DASHBOARD_ALLOWED_HOSTS", "").split(",")
+    if host.strip()
+)
 
 
 def should_require_auth(host: str, allow_public: bool = False) -> bool:
@@ -442,10 +450,15 @@ def _is_accepted_host(host_header: str, bound_host: str) -> bool:
     if bound_host in {"0.0.0.0", "::"}:
         return True
 
-    # Loopback bind: accept the loopback names
+    # Loopback bind: accept local aliases and explicitly configured reverse-
+    # proxy hostnames. The latter is intentionally an exact allowlist rather
+    # than a wildcard so the DNS-rebinding defence remains in place.
     bound_lc = bound_host.lower()
     if bound_lc in _LOOPBACK_HOST_VALUES:
-        return host_only in _LOOPBACK_HOST_VALUES
+        return (
+            host_only in _LOOPBACK_HOST_VALUES
+            or host_only in _EXTERNAL_ALLOWED_HOSTS
+        )
 
     # Explicit non-loopback bind: require exact host match
     return host_only == bound_lc
