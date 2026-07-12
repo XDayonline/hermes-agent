@@ -273,6 +273,16 @@ def test_fetch_account_usage_antigravity_with_quota(monkeypatch):
         lambda: {"access": "fake-access-token", "project_id": "my-project"},
     )
     monkeypatch.setattr(
+        antigravity_code_assist,
+        "retrieve_user_quota_summary_antigravity",
+        lambda token, project_id="": (_ for _ in ()).throw(RuntimeError("no summary api")),
+    )
+    monkeypatch.setattr(
+        antigravity_code_assist,
+        "fetch_available_models_with_fallbacks",
+        lambda token, project_id="": (_ for _ in ()).throw(RuntimeError("no models api")),
+    )
+    monkeypatch.setattr(
         antigravity_code_assist, "retrieve_user_quota_antigravity",
         lambda token, project_id="": [
             QuotaBucket(model_id="gemini-pro-agent", token_type="token",
@@ -290,6 +300,115 @@ def test_fetch_account_usage_antigravity_with_quota(monkeypatch):
     assert any("Claude" in d for d in snapshot.details)
     assert any("75%" in d for d in snapshot.details)
     assert any("50%" in d for d in snapshot.details)
+
+
+def test_fetch_account_usage_antigravity_quota_summary_includes_weekly_and_5h(monkeypatch):
+    from agent import antigravity_code_assist
+
+    monkeypatch.setattr(
+        "agent.account_usage._load_antigravity_oauth_token",
+        lambda: {"access": "fake-access-token", "project_id": "my-project"},
+    )
+    monkeypatch.setattr(
+        antigravity_code_assist,
+        "retrieve_user_quota_summary_antigravity",
+        lambda token, project_id="": {
+            "groups": [
+                {
+                    "displayName": "Gemini Models",
+                    "buckets": [
+                        {
+                            "bucketId": "gemini-weekly",
+                            "displayName": "Weekly Limit",
+                            "window": "weekly",
+                            "remainingFraction": 0.466,
+                            "resetTime": "2030-01-13T16:39:32Z",
+                        },
+                        {
+                            "bucketId": "gemini-5h",
+                            "displayName": "Five Hour Limit",
+                            "window": "5h",
+                            "remainingFraction": 0.947,
+                            "resetTime": "2030-01-12T17:32:17Z",
+                        },
+                    ],
+                },
+                {
+                    "displayName": "Claude and GPT models",
+                    "buckets": [
+                        {"displayName": "Weekly Limit", "remainingFraction": 0.667},
+                        {"displayName": "Five Hour Limit", "remainingFraction": 1.0},
+                    ],
+                },
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        antigravity_code_assist,
+        "fetch_available_models_with_fallbacks",
+        lambda token, project_id="": (_ for _ in ()).throw(AssertionError("fallback not used")),
+    )
+
+    snapshot = fetch_account_usage("google-antigravity")
+
+    assert snapshot is not None
+    assert snapshot.source == "oauth_quota_summary_api"
+    assert "Gemini Models" in snapshot.details
+    assert any("Weekly Limit" in d for d in snapshot.details)
+    assert any("Five Hour Limit" in d for d in snapshot.details)
+    assert any("47%" in d for d in snapshot.details)
+    assert any("95%" in d for d in snapshot.details)
+
+
+def test_fetch_account_usage_antigravity_available_models_includes_resets(monkeypatch):
+    from agent import antigravity_code_assist
+
+    monkeypatch.setattr(
+        "agent.account_usage._load_antigravity_oauth_token",
+        lambda: {"access": "fake-access-token", "project_id": "my-project"},
+    )
+    monkeypatch.setattr(
+        antigravity_code_assist,
+        "retrieve_user_quota_summary_antigravity",
+        lambda token, project_id="": (_ for _ in ()).throw(RuntimeError("no summary api")),
+    )
+    monkeypatch.setattr(
+        antigravity_code_assist,
+        "fetch_available_models_with_fallbacks",
+        lambda token, project_id="": {
+            "models": {
+                "claude-sonnet-4-6": {
+                    "displayName": "Claude Sonnet 4.6",
+                    "quotaInfo": {
+                        "remainingFraction": 0.40,
+                        "resetTime": "2030-01-01T05:00:00Z",
+                    },
+                },
+                "gemini-3-flash-agent": {
+                    "displayName": "Gemini 3 Flash",
+                    "quotaInfo": {
+                        "remainingFraction": 0.80,
+                        "resetTime": "2030-01-07T00:00:00Z",
+                    },
+                },
+            }
+        },
+    )
+    monkeypatch.setattr(
+        antigravity_code_assist,
+        "retrieve_user_quota_antigravity",
+        lambda token, project_id="": (_ for _ in ()).throw(AssertionError("fallback not used")),
+    )
+
+    snapshot = fetch_account_usage("google-antigravity")
+
+    assert snapshot is not None
+    assert snapshot.source == "oauth_models_api"
+    assert any("Claude" in d for d in snapshot.details)
+    assert any("Gemini Flash" in d for d in snapshot.details)
+    assert any("40%" in d for d in snapshot.details)
+    assert any("80%" in d for d in snapshot.details)
+    assert any("Weekly reset" in d for d in snapshot.details)
 
 
 def test_fetch_account_usage_antigravity_not_logged_in(monkeypatch):

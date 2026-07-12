@@ -20,10 +20,13 @@ from agent.google_code_assist import CodeAssistError
 
 logger = logging.getLogger(__name__)
 
-ANTIGRAVITY_CODE_ASSIST_ENDPOINT = "https://daily-cloudcode-pa.sandbox.googleapis.com"
+# Antigravity CLI 1.1.1 routes consumer accounts to the non-sandbox daily
+# endpoint. Keep prod and sandbox as fallbacks for account/rollout differences.
+ANTIGRAVITY_CODE_ASSIST_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com"
 ANTIGRAVITY_MODEL_ENDPOINTS = [
     ANTIGRAVITY_CODE_ASSIST_ENDPOINT,
     "https://cloudcode-pa.googleapis.com",
+    "https://daily-cloudcode-pa.sandbox.googleapis.com",
     "https://autopush-cloudcode-pa.sandbox.googleapis.com",
 ]
 
@@ -322,3 +325,17 @@ def retrieve_user_quota_antigravity(
             raw=b,
         ))
     return buckets
+
+
+def retrieve_user_quota_summary_antigravity(
+    access_token: str,
+    *,
+    project_id: str = "",
+    endpoint: str = ANTIGRAVITY_CODE_ASSIST_ENDPOINT,
+) -> Dict[str, Any]:
+    """Fetch Antigravity quota summary groups used by the CLI /usage view."""
+    body: Dict[str, Any] = {}
+    if project_id:
+        body["project"] = project_id
+    url = f"{endpoint}/v1internal:retrieveUserQuotaSummary"
+    return _post_json(url, body, access_token)

@@ -24,12 +24,14 @@ def _utc_now() -> datetime:
 
 
 def _progress_bar(pct: float, *, width: int = 24) -> str:
-    """Return an ASCII progress bar like  ████████████░░░░░░░░░░   60%."""
+    """Return a compact percentage label safe for chat clients.
+
+    Telegram renders block progress bars (█/░) poorly on some clients, turning
+    them into visual noise. Keep this plain so `/quota` stays readable across
+    CLI, WebUI, and gateway platforms.
+    """
     pct = max(0.0, min(100.0, float(pct)))
-    filled = round(pct / 100.0 * width)
-    empty = width - filled
-    bar = "█" * filled + "░" * empty
-    return f"{bar}  {round(pct)}% left"
+    return f"{round(pct)}% left"
 
 
 @dataclass(frozen=True)
@@ -670,9 +672,169 @@ def _load_antigravity_oauth_token() -> Optional[dict]:
         return None
 
 
+def _antigravity_quota_group(model_id: str, display_name: str = "") -> Optional[str]:
+    combined = f"{model_id} {display_name}".lower()
+    if "claude" in combined:
+        return "Claude"
+    if "gemini" in combined:
+        if "flash" in combined:
+            return "Gemini Flash"
+        return "Gemini Pro"
+    if "gpt" in combined:
+        return "GPT OSS"
+    return None
+
+
+def _antigravity_group_details(groups: dict[str, dict[str, Any]]) -> list[str]:
+    details: list[str] = []
+    for label in ("Claude", "Gemini Pro", "Gemini Flash", "GPT OSS"):
+        data = groups.get(label)
+        if not data:
+            continue
+        remaining = data.get("remaining")
+        if isinstance(remaining, (int, float)):
+            pct = int(round(max(0.0, min(1.0, float(remaining))) * 100))
+        else:
+            pct = 0
+        count = int(data.get("count") or 0)
+        suffix = f" ({count} models)" if count > 1 else ""
+        details.append(f"{label}{suffix}")
+        details.append(f"  {_progress_bar(pct)}")
+        reset = data.get("reset")
+        if isinstance(reset, datetime):
+            delta_hours = (reset - _utc_now()).total_seconds() / 3600
+            if delta_hours >= 48:
+                reset_label = "Weekly reset"
+            elif delta_hours <= 8:
+                reset_label = "5h reset"
+            else:
+                reset_label = "Reset"
+            details.append(f"  {reset_label} {_format_reset(reset)}")
+    return details
+
+
+def _antigravity_details_from_quota_summary(payload: dict[str, Any]) -> list[str]:
+    raw_groups = payload.get("groups")
+    if not isinstance(raw_groups, list):
+        return []
+    details: list[str] = []
+    for group in raw_groups:
+        if not isinstance(group, dict):
+            continue
+        group_name = str(group.get("displayName") or "").strip()
+        if group_name:
+            details.append(group_name)
+        buckets = group.get("buckets")
+        if not isinstance(buckets, list):
+            continue
+        for bucket in buckets:
+            if not isinstance(bucket, dict):
+                continue
+            label = str(bucket.get("displayName") or bucket.get("window") or "Quota").strip()
+            remaining = bucket.get("remainingFraction")
+            if not isinstance(remaining, (int, float)):
+                continue
+            pct = int(round(max(0.0, min(1.0, float(remaining))) * 100))
+            details.append(f"  {label}")
+            details.append(f"    {_progress_bar(pct)}")
+            reset = _parse_dt(bucket.get("resetTime"))
+            if reset is not None:
+                details.append(f"    Resets {_format_reset(reset)}")
+    return details
+
+
+def _antigravity_details_from_available_models(payload: dict[str, Any]) -> list[str]:
+    models = payload.get("models")
+    if not models:
+        return []
+    if isinstance(models, dict):
+        entries = models.items()
+    elif isinstance(models, list):
+        entries = []
+        for item in models:
+            if isinstance(item, dict):
+                model_id = str(
+                    item.get("modelId")
+                    or item.get("model_id")
+                    or item.get("modelName")
+                    or item.get("name")
+                    or item.get("id")
+                    or ""
+                )
+                entries.append((model_id, item))
+    else:
+        return []
+
+    groups: dict[str, dict[str, Any]] = {}
+    for key, value in entries:
+        if not isinstance(value, dict):
+            continue
+        model_id = str(
+            value.get("modelId")
+            or value.get("model_id")
+            or value.get("modelName")
+            or value.get("name")
+            or key
+            or ""
+        )
+        display = str(value.get("displayName") or value.get("label") or "")
+        group = _antigravity_quota_group(model_id, display)
+        if not group:
+            continue
+        quota = value.get("quotaInfo") or {}
+        if not isinstance(quota, dict):
+            continue
+        remaining = quota.get("remainingFraction")
+        if not isinstance(remaining, (int, float)):
+            continue
+        reset = _parse_dt(quota.get("resetTime"))
+        data = groups.setdefault(group, {"count": 0})
+        data["count"] = int(data.get("count") or 0) + 1
+        existing_remaining = data.get("remaining")
+        data["remaining"] = (
+            float(remaining)
+            if not isinstance(existing_remaining, (int, float))
+            else min(float(existing_remaining), float(remaining))
+        )
+        if reset is not None:
+            existing_reset = data.get("reset")
+            if not isinstance(existing_reset, datetime) or reset < existing_reset:
+                data["reset"] = reset
+    return _antigravity_group_details(groups)
+
+
+def _antigravity_details_from_buckets(buckets: list[Any]) -> list[str]:
+    _USER_FACING_PREFIXES = ("gemini-", "claude-", "gpt-")
+    groups: dict[str, dict[str, Any]] = {}
+    for b in sorted(buckets, key=lambda x: (x.model_id, x.token_type)):
+        if not b.model_id.startswith(_USER_FACING_PREFIXES):
+            continue
+        group = _antigravity_quota_group(str(b.model_id))
+        if not group:
+            continue
+        data = groups.setdefault(group, {"count": 0})
+        data["count"] = int(data.get("count") or 0) + 1
+        existing_remaining = data.get("remaining")
+        data["remaining"] = (
+            float(b.remaining_fraction)
+            if not isinstance(existing_remaining, (int, float))
+            else min(float(existing_remaining), float(b.remaining_fraction))
+        )
+        reset = _parse_dt(getattr(b, "reset_time_iso", ""))
+        if reset is not None:
+            existing_reset = data.get("reset")
+            if not isinstance(existing_reset, datetime) or reset < existing_reset:
+                data["reset"] = reset
+    return _antigravity_group_details(groups)
+
+
 def _fetch_antigravity_quota() -> Optional[AccountUsageSnapshot]:
     try:
-        from agent.antigravity_code_assist import retrieve_user_quota_antigravity
+        from agent.antigravity_code_assist import (
+            fetch_available_models_with_fallbacks,
+            retrieve_user_quota_antigravity,
+            retrieve_user_quota_summary_antigravity,
+        )
     except ImportError as exc:
         return AccountUsageSnapshot(
             provider="google-antigravity", source="oauth_quota_api",
@@ -688,13 +850,48 @@ def _fetch_antigravity_quota() -> Optional[AccountUsageSnapshot]:
         )
     access_token = str(token_info.get("access") or "").strip()
     project_id = str(token_info.get("project_id") or "").strip()
+
+    details: list[str] = []
+    quota_summary_error: Optional[Exception] = None
+    try:
+        quota_summary = retrieve_user_quota_summary_antigravity(access_token, project_id=project_id)
+        details = _antigravity_details_from_quota_summary(quota_summary)
+    except Exception as exc:
+        quota_summary_error = exc
+
+    if details:
+        return AccountUsageSnapshot(
+            provider="google-antigravity", source="oauth_quota_summary_api",
+            fetched_at=_utc_now(),
+            details=tuple(details),
+        )
+
+    available_models_error: Optional[Exception] = None
+    try:
+        available_models = fetch_available_models_with_fallbacks(access_token, project_id=project_id)
+        details = _antigravity_details_from_available_models(available_models)
+    except Exception as exc:
+        available_models_error = exc
+
+    if details:
+        return AccountUsageSnapshot(
+            provider="google-antigravity", source="oauth_models_api",
+            fetched_at=_utc_now(),
+            details=tuple(details),
+        )
+
     try:
         buckets = retrieve_user_quota_antigravity(access_token, project_id=project_id)
     except Exception as exc:
+        reason = f"Quota lookup failed: {exc}"
+        if quota_summary_error is not None:
+            reason = f"Quota lookup failed: {quota_summary_error}; fallback failed: {exc}"
+        if available_models_error is not None:
+            reason = f"Quota lookup failed: {available_models_error}; fallback failed: {exc}"
         return AccountUsageSnapshot(
             provider="google-antigravity", source="oauth_quota_api",
             fetched_at=_utc_now(),
-            unavailable_reason=f"Quota lookup failed: {exc}",
+            unavailable_reason=reason,
         )
     if not buckets:
         return AccountUsageSnapshot(
@@ -702,30 +899,7 @@ def _fetch_antigravity_quota() -> Optional[AccountUsageSnapshot]:
             fetched_at=_utc_now(),
             unavailable_reason="No quota buckets reported (free-tier or unmetered).",
         )
-    _USER_FACING_PREFIXES = ("gemini-", "claude-", "gpt-")
-    # Group by model family for a cleaner display
-    families: dict[str, list[tuple[str, float]]] = {}
-    for b in sorted(buckets, key=lambda x: (x.model_id, x.token_type)):
-        if not b.model_id.startswith(_USER_FACING_PREFIXES):
-            continue
-        # Extract family name: "gemini", "claude", "gpt"
-        family = b.model_id.split("-")[0]
-        families.setdefault(family, []).append(
-            (b.model_id, b.remaining_fraction)
-        )
-
-    details: list[str] = []
-    for family in sorted(families.keys()):
-        members = families[family]
-        # All members in a family share the same remaining % in practice
-        pct = int(round(members[0][1] * 100))
-        bar = _progress_bar(pct)
-        if family == "gpt":
-            label = "GPT OSS"
-        else:
-            label = family.capitalize()
-        details.append(f"{label}")
-        details.append(f"  {bar}")
+    details = _antigravity_details_from_buckets(buckets)
     return AccountUsageSnapshot(
         provider="google-antigravity", source="oauth_quota_api",
         fetched_at=_utc_now(),
