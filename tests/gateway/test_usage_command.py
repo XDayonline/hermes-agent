@@ -79,16 +79,22 @@ class TestQuotaCommand:
             provider="google-antigravity",
             source="oauth_models_api",
             fetched_at=MagicMock(),
-            details=("Claude", "  50% left"),
+            details=(
+                "Claude and GPT models",
+                "  Weekly Limit",
+                "    50% left",
+            ),
         )
 
         monkeypatch.setattr("gateway.slash_commands.fetch_all_providers_quota", lambda: [snapshot])
 
         result = await runner._handle_quota_command(event)
 
-        assert "📈 **Account limits**" in result
-        assert "Provider: google-antigravity" in result
-        assert "Claude" in result
+        assert result.splitlines()[0] == "📊 **Provider Quotas**"
+        assert "🧠 **Google Antigravity**" in result
+        assert "• **Weekly Limit** · 🟢 **50% left**" in result
+        assert "Account limits" not in result
+        assert "Provider:" not in result
 
 
 class TestUsageCachedAgent:
@@ -352,5 +358,6 @@ async def test_gateway_runner_exposes_quota_handler_from_slash_command_mixin(mon
     result = await runner._handle_quota_command(MagicMock())
 
     assert "Provider Quotas" in result
-    assert "openrouter" in result
-    assert "Credits balance: $12.00" in result
+    assert "OpenRouter" in result
+    assert "Credits balance" in result
+    assert "$12.00" in result

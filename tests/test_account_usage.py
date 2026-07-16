@@ -119,6 +119,99 @@ def test_render_account_usage_lines_includes_reset_and_provider():
     assert "Credits balance: $9.99" in lines[3]
 
 
+def test_render_account_quota_card_lines_formats_provider_window_and_balance(monkeypatch):
+    now = datetime(2026, 7, 16, 22, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(account_usage, "_utc_now", lambda: now)
+    snapshot = AccountUsageSnapshot(
+        provider="openai-codex",
+        source="usage_api",
+        fetched_at=now,
+        plan="Plus",
+        windows=(
+            AccountUsageWindow(
+                label="Session",
+                used_percent=32,
+                reset_at=datetime(2026, 7, 17, 3, 0, tzinfo=timezone.utc),
+            ),
+        ),
+        details=("Credits balance: $9.99",),
+    )
+
+    lines = account_usage.render_account_quota_card_lines(snapshot)
+
+    assert lines == [
+        "🤖 **OpenAI Codex** · Plus",
+        "🟢 **68% left** · Session",
+        "   ↳ Resets in 5h 0m (2026-07-17 03:00 UTC)",
+        "💳 **Credits balance** · $9.99",
+    ]
+
+
+def test_render_account_quota_card_lines_compacts_nested_quota_details(monkeypatch):
+    now = datetime(2026, 7, 16, 22, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(account_usage, "_utc_now", lambda: now)
+    snapshot = AccountUsageSnapshot(
+        provider="google-antigravity",
+        source="oauth_models_api",
+        fetched_at=now,
+        details=(
+            "Gemini Models",
+            "  Weekly Limit",
+            "    100% left",
+            "    Resets in 6d 23h (2026-07-23 21:00 UTC)",
+            "  Five Hour Limit",
+            "    18% left",
+            "    Resets in 4h 59m (2026-07-17 02:59 UTC)",
+        ),
+    )
+
+    lines = account_usage.render_account_quota_card_lines(snapshot)
+
+    assert lines == [
+        "🧠 **Google Antigravity**",
+        "**Gemini Models**",
+        "• **Weekly Limit** · 🟢 **100% left**",
+        "  ↳ Resets in 6d 23h (2026-07-23 21:00 UTC)",
+        "• **Five Hour Limit** · 🔴 **18% left**",
+        "  ↳ Resets in 4h 59m (2026-07-17 02:59 UTC)",
+    ]
+
+
+def test_render_account_quota_card_lines_ignores_non_finite_percentage_detail():
+    snapshot = AccountUsageSnapshot(
+        provider="example-provider",
+        source="test",
+        fetched_at=datetime.now(timezone.utc),
+        details=("Model limits", "  Weekly", "    inf% left"),
+    )
+
+    lines = account_usage.render_account_quota_card_lines(snapshot)
+
+    assert lines == [
+        "🔹 **Example Provider**",
+        "**Model limits**",
+        "• Weekly",
+        "• inf% left",
+    ]
+
+
+def test_render_account_quota_card_lines_marks_invalid_window_percentages_unavailable():
+    for invalid_percent in (float("inf"), float("-inf"), float("nan"), "bad"):
+        snapshot = AccountUsageSnapshot(
+            provider="example-provider",
+            source="test",
+            fetched_at=datetime.now(timezone.utc),
+            windows=(AccountUsageWindow(label="Session", used_percent=invalid_percent),),
+        )
+
+        lines = account_usage.render_account_quota_card_lines(snapshot)
+
+        assert lines == [
+            "🔹 **Example Provider**",
+            "⚪ **Unavailable** · Session",
+        ]
+
+
 def test_fetch_account_usage_openrouter_uses_limit_remaining_and_ignores_deprecated_rate_limit(monkeypatch):
     monkeypatch.setattr(
         "agent.account_usage.resolve_runtime_provider",
