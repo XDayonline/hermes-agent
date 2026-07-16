@@ -32,6 +32,7 @@ from typing import Any, Optional, Union
 from agent.account_usage import (
     fetch_account_usage,
     fetch_all_providers_quota,
+    render_account_quota_card_lines,
     render_account_usage_lines,
 )
 from agent.i18n import t
@@ -3917,7 +3918,7 @@ class GatewaySlashCommandsMixin:
         lines = ["📊 **Provider Quotas**"]
         for snapshot in snapshots:
             lines.append("")
-            lines.extend(render_account_usage_lines(snapshot, markdown=True))
+            lines.extend(render_account_quota_card_lines(snapshot))
         return "\n".join(lines)
 
     def _context_breakdown_lines(self, agent, source) -> list[str]:

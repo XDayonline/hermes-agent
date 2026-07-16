@@ -121,6 +121,129 @@ def render_account_usage_lines(snapshot: Optional[AccountUsageSnapshot], *, mark
     return lines
 
 
+_QUOTA_PROVIDER_PRESENTATION = {
+    "anthropic": ("🟠", "Anthropic"),
+    "deepseek": ("🔵", "DeepSeek"),
+    "google-antigravity": ("🧠", "Google Antigravity"),
+    "openai-codex": ("🤖", "OpenAI Codex"),
+    "opencode-go": ("⚡", "OpenCode Go"),
+    "openrouter": ("🌐", "OpenRouter"),
+}
+
+
+def _quota_status_icon(remaining_percent: int) -> str:
+    if remaining_percent >= 50:
+        return "🟢"
+    if remaining_percent >= 20:
+        return "🟡"
+    return "🔴"
+
+
+def _remaining_percent_from_detail(value: str) -> Optional[int]:
+    text = value.strip()
+    suffix = "% left"
+    if not text.lower().endswith(suffix):
+        return None
+    try:
+        numeric = float(text[: -len(suffix)].strip())
+    except ValueError:
+        return None
+    if not math.isfinite(numeric):
+        return None
+    percent = round(numeric)
+    return max(0, min(100, percent))
+
+
+def _render_quota_detail_lines(details: tuple[str, ...]) -> list[str]:
+    raw_details = [str(detail) for detail in details if str(detail).strip()]
+    lines: list[str] = []
+    index = 0
+    while index < len(raw_details):
+        raw = raw_details[index]
+        text = raw.strip()
+        indent = len(raw) - len(raw.lstrip())
+        next_raw = raw_details[index + 1] if index + 1 < len(raw_details) else ""
+        next_text = next_raw.strip()
+        next_indent = len(next_raw) - len(next_raw.lstrip()) if next_raw else 0
+
+        if indent == 0:
+            label, separator, value = text.partition(":")
+            if separator:
+                detail_icon = "💳" if "balance" in label.lower() else "🧾"
+                lines.append(f"{detail_icon} **{label}** · {value.strip()}")
+            elif next_indent > 0:
+                lines.append(f"**{text}**")
+            else:
+                lines.append(text)
+            index += 1
+            continue
+
+        remaining = _remaining_percent_from_detail(text)
+        if remaining is not None:
+            lines.append(f"  {_quota_status_icon(remaining)} **{remaining}% left**")
+            index += 1
+            continue
+
+        if text.lower().startswith(("reset ", "resets ")):
+            lines.append(f"  ↳ {text}")
+            index += 1
+            continue
+
+        next_remaining = _remaining_percent_from_detail(next_text) if next_indent > indent else None
+        if next_remaining is not None:
+            lines.append(
+                f"• **{text}** · {_quota_status_icon(next_remaining)} "
+                f"**{next_remaining}% left**"
+            )
+            index += 2
+            if index < len(raw_details):
+                reset_raw = raw_details[index]
+                reset_text = reset_raw.strip()
+                reset_indent = len(reset_raw) - len(reset_raw.lstrip())
+                if reset_indent > indent and reset_text.lower().startswith(("reset ", "resets ")):
+                    lines.append(f"  ↳ {reset_text}")
+                    index += 1
+            continue
+
+        lines.append(f"• {text}")
+        index += 1
+
+    return lines
+
+
+def render_account_quota_card_lines(snapshot: AccountUsageSnapshot) -> list[str]:
+    """Render one compact Markdown card for the gateway `/quota` command."""
+    provider_id = snapshot.provider.strip().lower()
+    icon, provider_name = _QUOTA_PROVIDER_PRESENTATION.get(
+        provider_id,
+        ("🔹", _title_case_slug(snapshot.provider) or snapshot.provider),
+    )
+    plan = f" · {snapshot.plan}" if snapshot.plan else ""
+    lines = [f"{icon} **{provider_name}**{plan}"]
+
+    for window in snapshot.windows:
+        try:
+            used_percent = float(window.used_percent) if window.used_percent is not None else None
+        except (TypeError, ValueError, OverflowError):
+            used_percent = None
+        if used_percent is None or not math.isfinite(used_percent):
+            lines.append(f"⚪ **Unavailable** · {window.label}")
+        else:
+            remaining = max(0, min(100, round(100 - used_percent)))
+            lines.append(f"{_quota_status_icon(remaining)} **{remaining}% left** · {window.label}")
+        if window.reset_at:
+            lines.append(f"   ↳ Resets {_format_reset(window.reset_at)}")
+        elif window.detail:
+            lines.append(f"   ↳ {window.detail}")
+
+    lines.extend(_render_quota_detail_lines(snapshot.details))
+
+    if snapshot.unavailable_reason:
+        lines.append(f"⚠️ {snapshot.unavailable_reason}")
+    return lines
+
+
+
 def _fmt_usd(d: float) -> str:
     return f"${d:,.2f}"
 
