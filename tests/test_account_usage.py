@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 
+from agent import account_usage
 from agent.account_usage import (
     AccountUsageSnapshot,
     AccountUsageWindow,
@@ -114,10 +115,8 @@ def test_render_account_usage_lines_includes_reset_and_provider():
 
     assert lines[0] == "📈 Account limits"
     assert "openai-codex (Pro)" in lines[1]
-    assert "Session" in lines[2]
-    assert "75% left" in lines[3]
-    assert "Resets" in lines[4]
-    assert "Credits balance: $9.99" in lines[5]
+    assert "Session: 75% remaining (25% used)" in lines[2]
+    assert "Credits balance: $9.99" in lines[3]
 
 
 def test_fetch_account_usage_openrouter_uses_limit_remaining_and_ignores_deprecated_rate_limit(monkeypatch):
@@ -205,219 +204,118 @@ def test_fetch_account_usage_openrouter_omits_quota_window_when_key_has_no_limit
     assert "API key usage: $25.50 total • $1.25 today • $4.50 this week • $18.00 this month" in snapshot.details
 
 
-def test_fetch_account_usage_deepseek_with_balance(monkeypatch):
-    monkeypatch.setattr(
-        "agent.account_usage.os.getenv",
-        lambda key, default=None: "sk-fake-key" if key == "DEEPSEEK_API_KEY" else default,
+def test_fetch_all_providers_quota_discovers_openrouter_without_env_key(monkeypatch):
+    """Aggregate discovery must delegate to runtime resolution, not env gates."""
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    calls = []
+    openrouter_snapshot = AccountUsageSnapshot(
+        provider="openrouter",
+        source="credits_api",
+        fetched_at=datetime.now(timezone.utc),
+        details=("Credits balance: $12.00",),
     )
+
+    def fake_fetch(provider):
+        calls.append(provider)
+        return openrouter_snapshot if provider == "openrouter" else None
+
+    monkeypatch.setattr(account_usage, "fetch_account_usage", fake_fetch)
+
+    snapshots = account_usage.fetch_all_providers_quota()
+
+    assert calls == ["openai-codex", "anthropic", "openrouter", "deepseek", "opencode-go"]
+    assert snapshots == [openrouter_snapshot]
+
+
+def test_fetch_account_usage_deepseek_uses_runtime_credentials_without_env_key(monkeypatch):
+    """DeepSeek quota discovery must use the runtime resolver like OpenRouter."""
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    resolver_calls = []
+
+    def resolve_runtime(requested, explicit_base_url=None, explicit_api_key=None):
+        resolver_calls.append((requested, explicit_base_url, explicit_api_key))
+        return {"api_key": "runtime-token"}
+
+    monkeypatch.setattr(account_usage, "resolve_runtime_provider", resolve_runtime)
     monkeypatch.setattr(
-        "agent.account_usage.httpx.Client",
-        lambda timeout=10.0: _Client({
-            "is_available": True,
-            "balance_infos": [
-                {"currency": "USD", "total_balance": "4.23",
-                 "granted_balance": "0.00", "topped_up_balance": "4.23"},
-            ],
-        }),
+        account_usage.httpx,
+        "Client",
+        lambda timeout=10.0: _Client(
+            {
+                "is_available": True,
+                "balance_infos": [{"currency": "USD", "total_balance": "12.34"}],
+            }
+        ),
     )
 
     snapshot = fetch_account_usage("deepseek")
 
+    assert resolver_calls == [("deepseek", None, None)]
     assert snapshot is not None
     assert snapshot.provider == "deepseek"
-    assert len(snapshot.details) == 1
-    assert "$4.23" in snapshot.details[0]
+    assert snapshot.details == ("Balance (USD): $12.34",)
 
 
-def test_fetch_account_usage_deepseek_no_api_key(monkeypatch):
+def test_fetch_account_usage_deepseek_derives_balance_endpoint_from_runtime_base_url(monkeypatch):
+    """A configured DeepSeek-compatible endpoint is used instead of the default host."""
+    requested_urls = []
+
+    class CapturingClient(_Client):
+        def get(self, url, headers=None):
+            requested_urls.append(url)
+            return super().get(url, headers=headers)
+
     monkeypatch.setattr(
-        "agent.account_usage.os.getenv",
-        lambda key, default=None: default,
+        account_usage,
+        "resolve_runtime_provider",
+        lambda **kwargs: {
+            "api_key": "runtime-token",
+            "base_url": "https://deepseek-proxy.example/v1/",
+        },
     )
-    snapshot = fetch_account_usage("deepseek")
-    assert snapshot is None
-
-
-def test_fetch_account_usage_deepseek_multiple_currencies(monkeypatch):
     monkeypatch.setattr(
-        "agent.account_usage.os.getenv",
-        lambda key, default=None: "sk-fake" if key == "DEEPSEEK_API_KEY" else default,
-    )
-    monkeypatch.setattr(
-        "agent.account_usage.httpx.Client",
-        lambda timeout=10.0: _Client({
-            "is_available": True,
-            "balance_infos": [
-                {"currency": "CNY", "total_balance": "30.00",
-                 "granted_balance": "10.00", "topped_up_balance": "20.00"},
-                {"currency": "USD", "total_balance": "1.50",
-                 "granted_balance": "0.00", "topped_up_balance": "1.50"},
-            ],
-        }),
+        account_usage.httpx,
+        "Client",
+        lambda timeout=10.0: CapturingClient(
+            {"is_available": True, "balance_infos": [{"currency": "USD", "total_balance": "12.34"}]}
+        ),
     )
 
     snapshot = fetch_account_usage("deepseek")
 
     assert snapshot is not None
-    assert len(snapshot.details) == 2
-    assert "¥30.00" in snapshot.details[0]
-    assert "$1.50" in snapshot.details[1]
+    assert requested_urls == ["https://deepseek-proxy.example/user/balance"]
 
 
-def test_fetch_account_usage_antigravity_with_quota(monkeypatch):
-    from agent.google_code_assist import QuotaBucket
-    from agent import antigravity_code_assist
+def test_fetch_account_usage_opencode_go_reads_dashboard_windows(monkeypatch):
+    """The personal-only OpenCode Go scraper exposes parsed dashboard limits."""
+    monkeypatch.setenv("OPENCODE_GO_WORKSPACE_ID", "workspace id")
+    monkeypatch.setenv("OPENCODE_GO_AUTH_COOKIE", "session-cookie")
+    calls = []
 
-    monkeypatch.setattr(
-        "agent.account_usage._load_antigravity_oauth_token",
-        lambda: {"access": "fake-access-token", "project_id": "my-project"},
-    )
-    monkeypatch.setattr(
-        antigravity_code_assist,
-        "retrieve_user_quota_summary_antigravity",
-        lambda token, project_id="": (_ for _ in ()).throw(RuntimeError("no summary api")),
-    )
-    monkeypatch.setattr(
-        antigravity_code_assist,
-        "fetch_available_models_with_fallbacks",
-        lambda token, project_id="": (_ for _ in ()).throw(RuntimeError("no models api")),
-    )
-    monkeypatch.setattr(
-        antigravity_code_assist, "retrieve_user_quota_antigravity",
-        lambda token, project_id="": [
-            QuotaBucket(model_id="gemini-pro-agent", token_type="token",
-                        remaining_fraction=0.75),
-            QuotaBucket(model_id="claude-sonnet-4-6", token_type="token",
-                        remaining_fraction=0.50),
-        ],
-    )
+    class DashboardResponse:
+        text = "rollingUsage:$R[1]={usagePercent:25,resetInSec:3600} weeklyUsage:$R[2]={resetInSec:7200,usagePercent:40}"
 
-    snapshot = fetch_account_usage("google-antigravity")
+        def raise_for_status(self):
+            return None
+
+    def fake_get(url, headers, timeout, follow_redirects):
+        calls.append((url, headers, timeout, follow_redirects))
+        return DashboardResponse()
+
+    monkeypatch.setattr(account_usage.httpx, "get", fake_get)
+
+    snapshot = fetch_account_usage("opencode-go")
 
     assert snapshot is not None
-    assert snapshot.provider == "google-antigravity"
-    assert any("Gemini" in d for d in snapshot.details)
-    assert any("Claude" in d for d in snapshot.details)
-    assert any("75%" in d for d in snapshot.details)
-    assert any("50%" in d for d in snapshot.details)
+    assert snapshot.provider == "opencode-go"
+    assert [(window.label, window.used_percent) for window in snapshot.windows] == [("5h", 25.0), ("Weekly", 40.0)]
+    assert calls[0][0] == "https://opencode.ai/workspace/workspace%20id/go"
+    assert calls[0][1]["Cookie"] == "auth=session-cookie"
 
 
-def test_fetch_account_usage_antigravity_quota_summary_includes_weekly_and_5h(monkeypatch):
-    from agent import antigravity_code_assist
+def test_fetch_account_usage_opencode_go_skips_missing_dashboard_credentials(monkeypatch):
+    monkeypatch.delenv("OPENCODE_GO_WORKSPACE_ID", raising=False)
+    monkeypatch.delenv("OPENCODE_GO_AUTH_COOKIE", raising=False)
 
-    monkeypatch.setattr(
-        "agent.account_usage._load_antigravity_oauth_token",
-        lambda: {"access": "fake-access-token", "project_id": "my-project"},
-    )
-    monkeypatch.setattr(
-        antigravity_code_assist,
-        "retrieve_user_quota_summary_antigravity",
-        lambda token, project_id="": {
-            "groups": [
-                {
-                    "displayName": "Gemini Models",
-                    "buckets": [
-                        {
-                            "bucketId": "gemini-weekly",
-                            "displayName": "Weekly Limit",
-                            "window": "weekly",
-                            "remainingFraction": 0.466,
-                            "resetTime": "2030-01-13T16:39:32Z",
-                        },
-                        {
-                            "bucketId": "gemini-5h",
-                            "displayName": "Five Hour Limit",
-                            "window": "5h",
-                            "remainingFraction": 0.947,
-                            "resetTime": "2030-01-12T17:32:17Z",
-                        },
-                    ],
-                },
-                {
-                    "displayName": "Claude and GPT models",
-                    "buckets": [
-                        {"displayName": "Weekly Limit", "remainingFraction": 0.667},
-                        {"displayName": "Five Hour Limit", "remainingFraction": 1.0},
-                    ],
-                },
-            ]
-        },
-    )
-    monkeypatch.setattr(
-        antigravity_code_assist,
-        "fetch_available_models_with_fallbacks",
-        lambda token, project_id="": (_ for _ in ()).throw(AssertionError("fallback not used")),
-    )
-
-    snapshot = fetch_account_usage("google-antigravity")
-
-    assert snapshot is not None
-    assert snapshot.source == "oauth_quota_summary_api"
-    assert "Gemini Models" in snapshot.details
-    assert any("Weekly Limit" in d for d in snapshot.details)
-    assert any("Five Hour Limit" in d for d in snapshot.details)
-    assert any("47%" in d for d in snapshot.details)
-    assert any("95%" in d for d in snapshot.details)
-
-
-def test_fetch_account_usage_antigravity_available_models_includes_resets(monkeypatch):
-    from agent import antigravity_code_assist
-
-    monkeypatch.setattr(
-        "agent.account_usage._load_antigravity_oauth_token",
-        lambda: {"access": "fake-access-token", "project_id": "my-project"},
-    )
-    monkeypatch.setattr(
-        antigravity_code_assist,
-        "retrieve_user_quota_summary_antigravity",
-        lambda token, project_id="": (_ for _ in ()).throw(RuntimeError("no summary api")),
-    )
-    monkeypatch.setattr(
-        antigravity_code_assist,
-        "fetch_available_models_with_fallbacks",
-        lambda token, project_id="": {
-            "models": {
-                "claude-sonnet-4-6": {
-                    "displayName": "Claude Sonnet 4.6",
-                    "quotaInfo": {
-                        "remainingFraction": 0.40,
-                        "resetTime": "2030-01-01T05:00:00Z",
-                    },
-                },
-                "gemini-3-flash-agent": {
-                    "displayName": "Gemini 3 Flash",
-                    "quotaInfo": {
-                        "remainingFraction": 0.80,
-                        "resetTime": "2030-01-07T00:00:00Z",
-                    },
-                },
-            }
-        },
-    )
-    monkeypatch.setattr(
-        antigravity_code_assist,
-        "retrieve_user_quota_antigravity",
-        lambda token, project_id="": (_ for _ in ()).throw(AssertionError("fallback not used")),
-    )
-
-    snapshot = fetch_account_usage("google-antigravity")
-
-    assert snapshot is not None
-    assert snapshot.source == "oauth_models_api"
-    assert any("Claude" in d for d in snapshot.details)
-    assert any("Gemini Flash" in d for d in snapshot.details)
-    assert any("40%" in d for d in snapshot.details)
-    assert any("80%" in d for d in snapshot.details)
-    assert any("Weekly reset" in d for d in snapshot.details)
-
-
-def test_fetch_account_usage_antigravity_not_logged_in(monkeypatch):
-    monkeypatch.setattr(
-        "agent.account_usage._load_antigravity_oauth_token",
-        lambda: None,
-    )
-
-    snapshot = fetch_account_usage("google-antigravity")
-
-    assert snapshot is not None
-    assert snapshot.unavailable_reason is not None
+    assert fetch_account_usage("opencode-go") is None
