@@ -402,6 +402,22 @@ class TestResolveDeliveryTarget:
             "thread_id": "17585",
         }
 
+    def test_explicit_telegram_topic_is_not_remapped_by_channel_directory(self):
+        """An explicit numeric topic must bypass fuzzy directory resolution."""
+        job = {"deliver": "telegram:-1003423473230:2"}
+        with patch(
+            "gateway.channel_directory.resolve_channel_name",
+            return_value="-1003423473230:5",
+        ) as resolve_mock:
+            result = _resolve_delivery_target(job)
+
+        resolve_mock.assert_not_called()
+        assert result == {
+            "platform": "telegram",
+            "chat_id": "-1003423473230",
+            "thread_id": "2",
+        }
+
     def test_explicit_discord_chat_id_without_thread_id(self):
         """deliver: 'discord:chat_id' sets thread_id to None."""
         job = {
