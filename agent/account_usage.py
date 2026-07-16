@@ -55,10 +55,8 @@ def _title_case_slug(value: Optional[str]) -> Optional[str]:
 
 
 def _parse_dt(value: Any) -> Optional[datetime]:
-    if value in {None, ""}:
+    if value is None:
         return None
-    if isinstance(value, (int, float)):
-        return datetime.fromtimestamp(float(value), tz=timezone.utc)
     if isinstance(value, str):
         text = value.strip()
         if not text:
@@ -69,6 +67,11 @@ def _parse_dt(value: Any) -> Optional[datetime]:
             dt = datetime.fromisoformat(text)
             return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
         except ValueError:
+            return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            return datetime.fromtimestamp(float(value), tz=timezone.utc)
+        except (TypeError, ValueError, OverflowError, OSError):
             return None
     return None
 
@@ -843,6 +846,79 @@ def _fetch_deepseek_account_usage(
     )
 
 
+def _antigravity_details_from_quota_summary(payload: dict[str, Any]) -> list[str]:
+    raw_groups = payload.get("groups")
+    if not isinstance(raw_groups, list):
+        return []
+
+    details: list[str] = []
+    for group in raw_groups:
+        if not isinstance(group, dict):
+            continue
+        group_name = str(group.get("displayName") or "").strip()
+        buckets = group.get("buckets")
+        if not group_name or not isinstance(buckets, list):
+            continue
+
+        group_details: list[str] = []
+        for bucket in buckets:
+            if not isinstance(bucket, dict):
+                continue
+            remaining = bucket.get("remainingFraction")
+            if not _is_finite_num(remaining):
+                continue
+            label = str(bucket.get("displayName") or bucket.get("window") or "Quota").strip()
+            percent = round(max(0.0, min(1.0, float(remaining))) * 100)
+            group_details.extend((f"  {label}", f"    {percent}% left"))
+            reset_at = _parse_dt(bucket.get("resetTime"))
+            if reset_at is not None:
+                group_details.append(f"    Resets {_format_reset(reset_at)}")
+
+        if group_details:
+            details.append(group_name)
+            details.extend(group_details)
+    return details
+
+
+def _fetch_antigravity_account_usage() -> Optional[AccountUsageSnapshot]:
+    runtime = resolve_runtime_provider(requested="google-antigravity")
+    access_token = str(runtime.get("api_key", "") or "").strip()
+    if not access_token:
+        return None
+    project_id = str(runtime.get("project_id", "") or "").strip()
+
+    try:
+        from agent.antigravity_code_assist import retrieve_user_quota_summary_antigravity
+
+        payload = retrieve_user_quota_summary_antigravity(
+            access_token,
+            project_id=project_id,
+        )
+    except Exception:
+        logger.debug("quota ▸ Google Antigravity lookup failed", exc_info=True)
+        return AccountUsageSnapshot(
+            provider="google-antigravity",
+            source="oauth_quota_summary_api",
+            fetched_at=_utc_now(),
+            unavailable_reason="Quota lookup failed.",
+        )
+
+    details = _antigravity_details_from_quota_summary(payload)
+    if not details:
+        return AccountUsageSnapshot(
+            provider="google-antigravity",
+            source="oauth_quota_summary_api",
+            fetched_at=_utc_now(),
+            unavailable_reason="No quota groups reported.",
+        )
+    return AccountUsageSnapshot(
+        provider="google-antigravity",
+        source="oauth_quota_summary_api",
+        fetched_at=_utc_now(),
+        details=tuple(details),
+    )
+
+
 def _parse_opencode_go_window(html: str, field: str) -> Optional[tuple[float, float]]:
     """Extract usage percentage and reset seconds from the Go dashboard payload."""
     import re
@@ -924,6 +1000,8 @@ def fetch_account_usage(
             return _fetch_openrouter_account_usage(base_url, api_key)
         if normalized == "deepseek":
             return _fetch_deepseek_account_usage(base_url, api_key)
+        if normalized == "google-antigravity":
+            return _fetch_antigravity_account_usage()
         if normalized == "opencode-go":
             return _fetch_opencode_go_quota()
     except Exception:
@@ -931,7 +1009,14 @@ def fetch_account_usage(
     return None
 
 
-_QUOTA_PROVIDER_IDS = ("openai-codex", "anthropic", "openrouter", "deepseek", "opencode-go")
+_QUOTA_PROVIDER_IDS = (
+    "openai-codex",
+    "anthropic",
+    "openrouter",
+    "google-antigravity",
+    "deepseek",
+    "opencode-go",
+)
 
 
 def fetch_all_providers_quota() -> list[AccountUsageSnapshot]:
