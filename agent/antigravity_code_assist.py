@@ -39,18 +39,20 @@ ANTIGRAVITY_USER_AGENT = "antigravity/1.0.0 windows/amd64"
 ANTIGRAVITY_X_GOOG_API_CLIENT = "google-cloud-sdk vscode_cloudshelleditor/0.1"
 
 DEFAULT_AGENT_MODEL_IDS = [
-    "gemini-3-flash-agent",
+    "gemini-3.5-flash-extra-low",
     "gemini-3.5-flash-low",
-    "gemini-pro-agent",
+    "gemini-3-flash-agent",
     "gemini-3.1-pro-low",
+    "gemini-pro-agent",
     "claude-sonnet-4-6",
     "claude-opus-4-6-thinking",
     "gpt-oss-120b-medium",
 ]
 
-DEPRECATED_MODEL_REPLACEMENTS = {
-    "gemini-3.1-pro-high": "gemini-pro-agent",
-}
+# No remapping needed: the picker now uses the real upstream IDs directly.
+# ANTIGRAVITY_MODEL_ALIASES in gemini_cloudcode_adapter.py handles the
+# dispatch-time translation for the few IDs that still need it (e.g.
+# gemini-3.1-pro-high → gemini-pro-agent for backward compat).
 
 
 @dataclass
@@ -224,6 +226,19 @@ def _ids_from_sort(sort: Dict[str, Any]) -> List[str]:
             mid = _model_id_from_value(value)
             if mid:
                 ids.append(mid)
+
+    groups = sort.get("groups")
+    if isinstance(groups, list):
+        for group in groups:
+            if isinstance(group, dict):
+                ids.extend(_ids_from_sort(group))
+            else:
+                mid = _model_id_from_value(group)
+                if mid:
+                    ids.append(mid)
+    elif isinstance(groups, dict):
+        ids.extend(_ids_from_sort(groups))
+
     return ids
 
 
@@ -250,15 +265,10 @@ def filter_agent_model_ids(ids: Iterable[str]) -> List[str]:
     seen: set[str] = set()
     filtered: List[str] = []
     raw = [str(mid).strip() for mid in ids if str(mid).strip()]
-    replacements = set(DEPRECATED_MODEL_REPLACEMENTS.values())
     for mid in raw:
         if mid in seen:
             continue
         if mid.startswith(("chat_", "tab_")):
-            continue
-        if mid in DEPRECATED_MODEL_REPLACEMENTS and DEPRECATED_MODEL_REPLACEMENTS[mid] in raw:
-            continue
-        if mid in replacements and mid in seen:
             continue
         seen.add(mid)
         filtered.append(mid)

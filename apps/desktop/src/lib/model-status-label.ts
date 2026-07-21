@@ -66,8 +66,20 @@ function prettifyBase(base: string): string {
     return base.replace(/^gpt-/i, 'GPT-')
   }
 
+  // Antigravity upstream IDs → human labels from API displayName
+  const antigravityLabels: Record<string, string> = {
+    'gemini-3.5-flash-extra-low': 'Gemini 3.5 Flash (Low)',
+    'gemini-3.5-flash-low': 'Gemini 3.5 Flash (Medium)',
+    'gemini-3-flash-agent': 'Gemini 3.5 Flash (High)',
+    'gemini-3.1-pro-low': 'Gemini 3.1 Pro (Low)',
+    'gemini-pro-agent': 'Gemini 3.1 Pro (High)',
+  }
+  if (base in antigravityLabels) {
+    return antigravityLabels[base]
+  }
+
   if (/^gemini-/i.test(base)) {
-    return base.replace(/^gemini-/i, 'Gemini ').replace(/-/g, ' ')
+    return titleCase(base.replace(/^gemini-/i, 'Gemini ').replace(/-/g, ' '))
   }
 
   return titleCase(base.replace(/-/g, ' '))

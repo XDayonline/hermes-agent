@@ -297,14 +297,14 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "gemini-3.1-flash-lite-preview",
     ],
     "google-antigravity": [
+        "gemini-3.5-flash-extra-low",
         "gemini-3.5-flash-low",
-        "gemini-3.5-flash-medium",
-        "gemini-3.5-flash-high",
+        "gemini-3-flash-agent",
         "gemini-3.1-pro-low",
-        "gemini-3.1-pro-high",
         "gemini-pro-agent",
         "claude-sonnet-4-6",
         "claude-opus-4-6-thinking",
+        "gpt-oss-120b-medium",
     ],
     "zai": [
         "glm-5.2",

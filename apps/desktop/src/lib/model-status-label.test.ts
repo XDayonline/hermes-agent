@@ -13,6 +13,12 @@ describe('model-status-label', () => {
     expect(displayModelName('openai/gpt-5.5-fast')).toBe('GPT-5.5')
     expect(displayModelName('deepseek/deepseek-v4-pro-thinking')).toBe('Deepseek V4 Pro')
     expect(displayModelName('openai/gpt-5.5')).toBe('GPT-5.5')
+    expect(displayModelName('gemini-3.1-pro-high')).toBe('Gemini 3.1 Pro High')
+    expect(displayModelName('gemini-3.5-flash-extra-low')).toBe('Gemini 3.5 Flash (Low)')
+    expect(displayModelName('gemini-3.5-flash-low')).toBe('Gemini 3.5 Flash (Medium)')
+    expect(displayModelName('gemini-3-flash-agent')).toBe('Gemini 3.5 Flash (High)')
+    expect(displayModelName('gemini-3.1-pro-low')).toBe('Gemini 3.1 Pro (Low)')
+    expect(displayModelName('gemini-pro-agent')).toBe('Gemini 3.1 Pro (High)')
   })
 
   it('strips trailing date-pin snapshots from the display name', () => {

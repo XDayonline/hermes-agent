@@ -165,6 +165,7 @@ PROVIDER_TO_MODELS_DEV: Dict[str, str] = {
     "huggingface": "huggingface",
     "gemini": "google",
     "google": "google",
+    "google-antigravity": "google",
     "xai": "xai",
     # xAI OAuth is an authentication/transport path for the same xAI model
     # catalog, so model metadata should resolve through the xAI provider.
@@ -464,6 +465,24 @@ def get_model_capabilities(provider: str, model: str) -> Optional[ModelCapabilit
     models = _get_provider_models(provider)
     if models is None:
         return None
+
+    if provider == "google-antigravity":
+        # Antigravity exposes clean tier ids that don't exist in the public
+        # models.dev catalog. Provide best-effort capability metadata so the
+        # picker can show reasoning/fast toggles without crashing.
+        caps = ModelCapabilities(
+            supports_tools=True,
+            supports_vision=False,
+            supports_reasoning="pro" in model or "opus" in model or "sonnet" in model,
+            context_window=1000000 if "gemini" in model else 200000,
+            max_output_tokens=8192,
+        )
+        if "flash" in model:
+            caps.supports_reasoning = False
+        if "gpt-oss" in model:
+            caps.supports_reasoning = False
+            caps.context_window = 128000
+        return caps
 
     entry = _find_model_entry(models, model)
     if entry is None:
