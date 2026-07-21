@@ -32,22 +32,58 @@ export function percentToZoomLevel(percent) {
   return clampZoomLevel(Math.log(percent / 100) / Math.log(ZOOM_FACTOR_BASE))
 }
 
-// Chromium on Windows can drop webContents zoom when a BrowserWindow is minimized
-// and restored. Re-apply the persisted level on these lifecycle transitions.
-export const ZOOM_REASSERT_WINDOW_EVENTS = ['show', 'restore']
+/**
+ * Apply a clamped zoom level to a webContents AND notify the renderer, in that
+ * order. Every path that changes zoom (user action, restore-on-load, lifecycle
+ * re-assert) funnels through here so the settings UI Scale control can never
+ * drift from the actually-applied level — the bug where restore set the level
+ * but forgot to emit 'hermes:zoom:changed', leaving the control stuck at 100%.
+ * Returns the clamped level so callers can persist it.
+ */
+export function applyZoomLevel(webContents, level) {
+  const clamped = clampZoomLevel(level)
+  webContents.setZoomLevel(clamped)
+  webContents.send('hermes:zoom:changed', { level: clamped, percent: zoomLevelToPercent(clamped) })
 
-export function installZoomReassertOnWindowEvents(win, reassert) {
+  return clamped
+}
+
+// Chromium can drop webContents zoom when a BrowserWindow is resized, minimized
+// and restored, or crosses onto a monitor with different display scaling. macOS
+// and Windows provide trailing `resized`/`moved` events; Linux only provides the
+// noisy `resize`/`move` pair, so debounce those fallbacks before re-applying the
+// persisted level.
+export const ZOOM_RESIZE_REASSERT_DELAY_MS = 100
+
+export function zoomReassertWindowEvents(platform = process.platform) {
+  return platform === 'linux' ? ['show', 'restore', 'resize', 'move'] : ['show', 'restore', 'resized', 'moved']
+}
+
+export function installZoomReassertOnWindowEvents(win, reassert, platform = process.platform) {
   if (!win?.on) {
     return
   }
 
-  for (const event of ZOOM_REASSERT_WINDOW_EVENTS) {
+  let resizeTimer
+
+  for (const event of zoomReassertWindowEvents(platform)) {
     win.on(event, () => {
       if (win.isDestroyed?.()) {
         return
       }
 
-      reassert()
+      if (event !== 'resize' && event !== 'move') {
+        reassert()
+
+        return
+      }
+
+      clearTimeout(resizeTimer)
+      resizeTimer = setTimeout(() => {
+        if (!win.isDestroyed?.()) {
+          reassert()
+        }
+      }, ZOOM_RESIZE_REASSERT_DELAY_MS)
     })
   }
 }
