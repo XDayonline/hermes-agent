@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Optional
 
 import httpx
@@ -54,10 +55,8 @@ def _title_case_slug(value: Optional[str]) -> Optional[str]:
 
 
 def _parse_dt(value: Any) -> Optional[datetime]:
-    if value in {None, ""}:
+    if value is None:
         return None
-    if isinstance(value, (int, float)):
-        return datetime.fromtimestamp(float(value), tz=timezone.utc)
     if isinstance(value, str):
         text = value.strip()
         if not text:
@@ -68,6 +67,11 @@ def _parse_dt(value: Any) -> Optional[datetime]:
             dt = datetime.fromisoformat(text)
             return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
         except ValueError:
+            return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            return datetime.fromtimestamp(float(value), tz=timezone.utc)
+        except (TypeError, ValueError, OverflowError, OSError):
             return None
     return None
 
@@ -118,6 +122,129 @@ def render_account_usage_lines(snapshot: Optional[AccountUsageSnapshot], *, mark
     if snapshot.unavailable_reason:
         lines.append(f"Unavailable: {snapshot.unavailable_reason}")
     return lines
+
+
+_QUOTA_PROVIDER_PRESENTATION = {
+    "anthropic": ("🟠", "Anthropic"),
+    "deepseek": ("🔵", "DeepSeek"),
+    "google-antigravity": ("🧠", "Google Antigravity"),
+    "openai-codex": ("🤖", "OpenAI Codex"),
+    "opencode-go": ("⚡", "OpenCode Go"),
+    "openrouter": ("🌐", "OpenRouter"),
+}
+
+
+def _quota_status_icon(remaining_percent: int) -> str:
+    if remaining_percent >= 50:
+        return "🟢"
+    if remaining_percent >= 20:
+        return "🟡"
+    return "🔴"
+
+
+def _remaining_percent_from_detail(value: str) -> Optional[int]:
+    text = value.strip()
+    suffix = "% left"
+    if not text.lower().endswith(suffix):
+        return None
+    try:
+        numeric = float(text[: -len(suffix)].strip())
+    except ValueError:
+        return None
+    if not math.isfinite(numeric):
+        return None
+    percent = round(numeric)
+    return max(0, min(100, percent))
+
+
+def _render_quota_detail_lines(details: tuple[str, ...]) -> list[str]:
+    raw_details = [str(detail) for detail in details if str(detail).strip()]
+    lines: list[str] = []
+    index = 0
+    while index < len(raw_details):
+        raw = raw_details[index]
+        text = raw.strip()
+        indent = len(raw) - len(raw.lstrip())
+        next_raw = raw_details[index + 1] if index + 1 < len(raw_details) else ""
+        next_text = next_raw.strip()
+        next_indent = len(next_raw) - len(next_raw.lstrip()) if next_raw else 0
+
+        if indent == 0:
+            label, separator, value = text.partition(":")
+            if separator:
+                detail_icon = "💳" if "balance" in label.lower() else "🧾"
+                lines.append(f"{detail_icon} **{label}** · {value.strip()}")
+            elif next_indent > 0:
+                lines.append(f"**{text}**")
+            else:
+                lines.append(text)
+            index += 1
+            continue
+
+        remaining = _remaining_percent_from_detail(text)
+        if remaining is not None:
+            lines.append(f"  {_quota_status_icon(remaining)} **{remaining}% left**")
+            index += 1
+            continue
+
+        if text.lower().startswith(("reset ", "resets ")):
+            lines.append(f"  ↳ {text}")
+            index += 1
+            continue
+
+        next_remaining = _remaining_percent_from_detail(next_text) if next_indent > indent else None
+        if next_remaining is not None:
+            lines.append(
+                f"• **{text}** · {_quota_status_icon(next_remaining)} "
+                f"**{next_remaining}% left**"
+            )
+            index += 2
+            if index < len(raw_details):
+                reset_raw = raw_details[index]
+                reset_text = reset_raw.strip()
+                reset_indent = len(reset_raw) - len(reset_raw.lstrip())
+                if reset_indent > indent and reset_text.lower().startswith(("reset ", "resets ")):
+                    lines.append(f"  ↳ {reset_text}")
+                    index += 1
+            continue
+
+        lines.append(f"• {text}")
+        index += 1
+
+    return lines
+
+
+def render_account_quota_card_lines(snapshot: AccountUsageSnapshot) -> list[str]:
+    """Render one compact Markdown card for the gateway `/quota` command."""
+    provider_id = snapshot.provider.strip().lower()
+    icon, provider_name = _QUOTA_PROVIDER_PRESENTATION.get(
+        provider_id,
+        ("🔹", _title_case_slug(snapshot.provider) or snapshot.provider),
+    )
+    plan = f" · {snapshot.plan}" if snapshot.plan else ""
+    lines = [f"{icon} **{provider_name}**{plan}"]
+
+    for window in snapshot.windows:
+        try:
+            used_percent = float(window.used_percent) if window.used_percent is not None else None
+        except (TypeError, ValueError, OverflowError):
+            used_percent = None
+        if used_percent is None or not math.isfinite(used_percent):
+            lines.append(f"⚪ **Unavailable** · {window.label}")
+        else:
+            remaining = max(0, min(100, round(100 - used_percent)))
+            lines.append(f"{_quota_status_icon(remaining)} **{remaining}% left** · {window.label}")
+        if window.reset_at:
+            lines.append(f"   ↳ Resets {_format_reset(window.reset_at)}")
+        elif window.detail:
+            lines.append(f"   ↳ {window.detail}")
+
+    lines.extend(_render_quota_detail_lines(snapshot.details))
+
+    if snapshot.unavailable_reason:
+        lines.append(f"⚠️ {snapshot.unavailable_reason}")
+    return lines
+
 
 
 def _fmt_usd(d: float) -> str:
@@ -214,7 +341,7 @@ def build_nous_credits_snapshot(account_info) -> Optional[AccountUsageSnapshot]:
             return None
 
         details.append(f"Top up: {nous_portal_topup_url(account_info)}")
-        details.append("(or run /credits)")
+        details.append("(or run /topup)")
 
         plan = getattr(sub, "plan", None) if sub is not None else None
         return AccountUsageSnapshot(
@@ -340,7 +467,7 @@ def _snapshot_from_credits_state(state) -> Optional[AccountUsageSnapshot]:
 
 @dataclass(frozen=True)
 class CreditsView:
-    """Surface-agnostic data for the ``/credits`` command.
+    """Surface-agnostic data for the ``/topup`` balance view.
 
     One portal fetch, one parse — consumed identically by the CLI panel, the
     gateway button, and any other money surface. Fail-open: when not logged in
@@ -356,11 +483,11 @@ class CreditsView:
 
 
 def build_credits_view(*, markdown: bool = False, timeout: float = 10.0) -> CreditsView:
-    """Build the /credits view: balance block + identity line + top-up URL.
+    """Build the /topup balance view: balance block + identity line + top-up URL.
 
     Reuses the same account fetch + snapshot + URL builder as the /usage credits
     block, so the numbers always match. The balance block is the rendered
-    snapshot MINUS its trailing top-up/command-hint lines (the /credits surface
+    snapshot MINUS its trailing top-up/command-hint lines (the /topup surface
     supplies its own affordance). Fail-open → ``CreditsView(logged_in=False)``.
     """
     not_logged_in = CreditsView(logged_in=False)
@@ -386,7 +513,7 @@ def build_credits_view(*, markdown: bool = False, timeout: float = 10.0) -> Cred
                 timeout=timeout
             )
     except Exception:
-        logger.debug("credits ▸ /credits portal fetch failed (fail-open)", exc_info=True)
+        logger.debug("credits ▸ /topup portal fetch failed (fail-open)", exc_info=True)
         return not_logged_in
 
     if account is None or not getattr(account, "logged_in", False):
@@ -394,8 +521,8 @@ def build_credits_view(*, markdown: bool = False, timeout: float = 10.0) -> Cred
 
     snapshot = build_nous_credits_snapshot(account)
     # Balance lines = the snapshot block minus the two trailing affordance lines
-    # ("Top up: <url>" + "(or run /credits)") that build_nous_credits_snapshot
-    # appends for the /usage surface. /credits renders its own button/panel.
+    # ("Top up: <url>" + "(or run /topup)") that build_nous_credits_snapshot
+    # appends for the /usage surface. /topup renders its own button/panel.
     balance_lines: list[str] = []
     if snapshot is not None:
         rendered = render_account_usage_lines(snapshot, markdown=markdown)
@@ -425,15 +552,28 @@ def build_credits_view(*, markdown: bool = False, timeout: float = 10.0) -> Cred
     )
 
 
-def _resolve_codex_usage_url(base_url: str) -> str:
+def _codex_backend_urls(base_url: str) -> tuple[str, str, str]:
+    """Resolve the Codex backend endpoints (usage, reset-credits list, consume).
+
+    Mirrors the Codex CLI's PathStyle split (codex-rs backend-client): base URLs
+    containing ``/backend-api`` use the ChatGPT ``/wham/...`` paths; everything
+    else uses ``/api/codex/...``.
+    """
     normalized = (base_url or "").strip().rstrip("/")
     if not normalized:
         normalized = "https://chatgpt.com/backend-api/codex"
     if normalized.endswith("/codex"):
         normalized = normalized[: -len("/codex")]
-    if "/backend-api" in normalized:
-        return normalized + "/wham/usage"
-    return normalized + "/api/codex/usage"
+    prefix = normalized + ("/wham" if "/backend-api" in normalized else "/api/codex")
+    return (
+        prefix + "/usage",
+        prefix + "/rate-limit-reset-credits",
+        prefix + "/rate-limit-reset-credits/consume",
+    )
+
+
+def _resolve_codex_usage_url(base_url: str) -> str:
+    return _codex_backend_urls(base_url)[0]
 
 
 def _resolve_codex_usage_credentials(
@@ -525,6 +665,14 @@ def _fetch_codex_account_usage(
             )
         )
     details: list[str] = []
+    reset_credits = payload.get("rate_limit_reset_credits") or {}
+    banked = reset_credits.get("available_count")
+    if isinstance(banked, (int, float)) and int(banked) > 0:
+        count = int(banked)
+        plural = "s" if count != 1 else ""
+        details.append(
+            f"You have {count} reset{plural} banked - use /usage reset to activate"
+        )
     credits = payload.get("credits") or {}
     if credits.get("has_credits"):
         balance = credits.get("balance")
@@ -539,6 +687,179 @@ def _fetch_codex_account_usage(
         plan=_title_case_slug(payload.get("plan_type")),
         windows=tuple(windows),
         details=tuple(details),
+    )
+
+
+@dataclass(frozen=True)
+class CodexResetRedeemResult:
+    """Outcome of a `/usage reset` attempt against the Codex backend."""
+
+    status: str  # reset | nothing_to_reset | no_credit | already_redeemed |
+    #              not_exhausted | no_credits_banked | unavailable
+    message: str
+    available_count: int = 0
+    windows_reset: int = 0
+
+    @property
+    def redeemed(self) -> bool:
+        return self.status == "reset"
+
+
+# Client-side guard threshold: a rate-limit window only counts as exhausted
+# when it is fully used. Below this, redeeming a banked reset wastes most of
+# its value, so we block and point at --force instead.
+_CODEX_WINDOW_EXHAUSTED_PERCENT = 100.0
+
+
+def redeem_codex_reset_credit(
+    *,
+    base_url: Optional[str] = None,
+    api_key: Optional[str] = None,
+    force: bool = False,
+) -> CodexResetRedeemResult:
+    """Redeem one banked Codex rate-limit reset credit (`/usage reset`).
+
+    Flow (mirrors the Codex CLI's reset-credits picker, codex-rs
+    ``backend-client``):
+
+    1. ``GET .../usage`` — read the current windows + banked credit count.
+    2. Guard: zero banked credits → refuse. No window fully used and not
+       ``force`` → refuse with a warning (a banked reset restores the WHOLE
+       5h + weekly allowance; burning it early wastes it). The backend has
+       the same protection (``nothing_to_reset`` doesn't consume the
+       credit), but failing fast client-side gives a clearer message.
+    3. ``POST .../rate-limit-reset-credits/consume`` with a fresh UUID
+       idempotency key (``redeem_request_id``). No ``credit_id`` — the
+       backend picks the next available credit, exactly like the CLI's
+       default "Full reset" option.
+
+    Never raises: every failure mode returns a ``CodexResetRedeemResult``
+    with a user-renderable message.
+    """
+    import uuid
+
+    try:
+        token, resolved_base_url, account_id = _resolve_codex_usage_credentials(base_url, api_key)
+    except Exception:
+        return CodexResetRedeemResult(
+            status="unavailable",
+            message="No Codex credentials available. Run `hermes auth` to sign in with your ChatGPT account.",
+        )
+    usage_url, _credits_url, consume_url = _codex_backend_urls(resolved_base_url)
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "User-Agent": "codex-cli",
+    }
+    if account_id:
+        headers["ChatGPT-Account-Id"] = account_id
+
+    try:
+        with httpx.Client(timeout=15.0) as client:
+            usage_resp = client.get(usage_url, headers=headers)
+            usage_resp.raise_for_status()
+            payload = usage_resp.json() or {}
+
+            reset_credits = payload.get("rate_limit_reset_credits") or {}
+            raw_count = reset_credits.get("available_count")
+            available = int(raw_count) if isinstance(raw_count, (int, float)) else 0
+            if available <= 0:
+                return CodexResetRedeemResult(
+                    status="no_credits_banked",
+                    message="No banked reset credits on this account — nothing to redeem.",
+                )
+
+            rate_limit = payload.get("rate_limit") or {}
+            worst_used: Optional[float] = None
+            for key in ("primary_window", "secondary_window"):
+                used = (rate_limit.get(key) or {}).get("used_percent")
+                if isinstance(used, (int, float)):
+                    worst_used = max(worst_used or 0.0, float(used))
+            exhausted = worst_used is not None and worst_used >= _CODEX_WINDOW_EXHAUSTED_PERCENT
+            if not exhausted and not force:
+                usage_note = (
+                    f"your busiest window is only {worst_used:.0f}% used"
+                    if worst_used is not None
+                    else "your current usage could not be confirmed as exhausted"
+                )
+                plural = "s" if available != 1 else ""
+                return CodexResetRedeemResult(
+                    status="not_exhausted",
+                    message=(
+                        f"⚠️ Not redeeming: {usage_note}. A banked reset restores your FULL "
+                        f"5h + weekly limits, so spending it now would waste most of it. "
+                        f"You have {available} reset{plural} banked. "
+                        f"Use `/usage reset --force` to redeem anyway."
+                    ),
+                    available_count=available,
+                )
+
+            consume_resp = client.post(
+                consume_url,
+                headers={**headers, "Content-Type": "application/json"},
+                json={"redeem_request_id": str(uuid.uuid4())},
+            )
+            consume_resp.raise_for_status()
+            body = consume_resp.json() or {}
+    except httpx.HTTPStatusError as exc:
+        code = exc.response.status_code
+        if code in (401, 403):
+            return CodexResetRedeemResult(
+                status="unavailable",
+                message=(
+                    "Codex backend rejected the request (HTTP "
+                    f"{code}). Reset credits require ChatGPT-account (OAuth) auth — "
+                    "run `hermes auth` and sign in with your ChatGPT account."
+                ),
+            )
+        return CodexResetRedeemResult(
+            status="unavailable",
+            message=f"Codex backend error (HTTP {code}) — try again shortly.",
+        )
+    except Exception as exc:
+        return CodexResetRedeemResult(
+            status="unavailable",
+            message=f"Could not reach the Codex backend: {exc}",
+        )
+
+    code = str(body.get("code", "") or "").strip().lower()
+    windows_reset = body.get("windows_reset")
+    windows_reset = int(windows_reset) if isinstance(windows_reset, (int, float)) else 0
+    remaining = max(0, available - 1)
+    plural = "s" if remaining != 1 else ""
+    if code == "reset":
+        return CodexResetRedeemResult(
+            status="reset",
+            message=(
+                f"✅ Reset redeemed — your usage limits have been reset. "
+                f"{remaining} banked reset{plural} remaining."
+            ),
+            available_count=remaining,
+            windows_reset=windows_reset,
+        )
+    if code == "nothing_to_reset":
+        return CodexResetRedeemResult(
+            status="nothing_to_reset",
+            message=(
+                "Backend reports nothing to reset — your limits aren't exhausted. "
+                "The credit was NOT spent."
+            ),
+            available_count=available,
+        )
+    if code == "no_credit":
+        return CodexResetRedeemResult(
+            status="no_credit",
+            message="Backend reports no available reset credit on this account.",
+        )
+    if code == "already_redeemed":
+        return CodexResetRedeemResult(
+            status="already_redeemed",
+            message="This redemption was already processed — no additional credit was spent.",
+            available_count=remaining,
+        )
+    return CodexResetRedeemResult(
+        status="unavailable",
+        message=f"Unexpected response from the Codex backend: {body!r}",
     )
 
 
@@ -719,6 +1040,142 @@ def _fetch_deepseek_account_usage(
     )
 
 
+def _antigravity_details_from_quota_summary(payload: dict[str, Any]) -> list[str]:
+    raw_groups = payload.get("groups")
+    if not isinstance(raw_groups, list):
+        return []
+
+    details: list[str] = []
+    for group in raw_groups:
+        if not isinstance(group, dict):
+            continue
+        group_name = str(group.get("displayName") or "").strip()
+        buckets = group.get("buckets")
+        if not group_name or not isinstance(buckets, list):
+            continue
+
+        group_details: list[str] = []
+        for bucket in buckets:
+            if not isinstance(bucket, dict):
+                continue
+            remaining = bucket.get("remainingFraction")
+            if not _is_finite_num(remaining):
+                continue
+            label = str(bucket.get("displayName") or bucket.get("window") or "Quota").strip()
+            percent = round(max(0.0, min(1.0, float(remaining))) * 100)
+            group_details.extend((f"  {label}", f"    {percent}% left"))
+            reset_at = _parse_dt(bucket.get("resetTime"))
+            if reset_at is not None:
+                group_details.append(f"    Resets {_format_reset(reset_at)}")
+
+        if group_details:
+            details.append(group_name)
+            details.extend(group_details)
+    return details
+
+
+def _fetch_antigravity_account_usage() -> Optional[AccountUsageSnapshot]:
+    runtime = resolve_runtime_provider(requested="google-antigravity")
+    access_token = str(runtime.get("api_key", "") or "").strip()
+    if not access_token:
+        return None
+    project_id = str(runtime.get("project_id", "") or "").strip()
+
+    try:
+        from agent.antigravity_code_assist import retrieve_user_quota_summary_antigravity
+
+        payload = retrieve_user_quota_summary_antigravity(
+            access_token,
+            project_id=project_id,
+        )
+    except Exception:
+        logger.debug("quota ▸ Google Antigravity lookup failed", exc_info=True)
+        return AccountUsageSnapshot(
+            provider="google-antigravity",
+            source="oauth_quota_summary_api",
+            fetched_at=_utc_now(),
+            unavailable_reason="Quota lookup failed.",
+        )
+
+    details = _antigravity_details_from_quota_summary(payload)
+    if not details:
+        return AccountUsageSnapshot(
+            provider="google-antigravity",
+            source="oauth_quota_summary_api",
+            fetched_at=_utc_now(),
+            unavailable_reason="No quota groups reported.",
+        )
+    return AccountUsageSnapshot(
+        provider="google-antigravity",
+        source="oauth_quota_summary_api",
+        fetched_at=_utc_now(),
+        details=tuple(details),
+    )
+
+
+def _parse_opencode_go_window(html: str, field: str) -> Optional[tuple[float, float]]:
+    """Extract usage percentage and reset seconds from the Go dashboard payload."""
+    import re
+
+    patterns = (
+        rf"{field}:\$R\[\d+\]=\{{[^}}]*usagePercent:(-?\d+(?:\.\d+)?)[^}}]*resetInSec:(-?\d+(?:\.\d+)?)[^}}]*\}}",
+        rf"{field}:\$R\[\d+\]=\{{[^}}]*resetInSec:(-?\d+(?:\.\d+)?)[^}}]*usagePercent:(-?\d+(?:\.\d+)?)[^}}]*\}}",
+    )
+    for index, pattern in enumerate(patterns):
+        match = re.search(pattern, html)
+        if not match:
+            continue
+        first, second = (max(0.0, float(value)) for value in match.groups())
+        return (first, second) if index == 0 else (second, first)
+    return None
+
+
+def _fetch_opencode_go_quota() -> Optional[AccountUsageSnapshot]:
+    """Read local OpenCode Go subscription limits from its authenticated dashboard."""
+    workspace_id = os.getenv("OPENCODE_GO_WORKSPACE_ID", "").strip()
+    auth_cookie = os.getenv("OPENCODE_GO_AUTH_COOKIE", "").strip()
+    if not workspace_id or not auth_cookie:
+        return None
+
+    from urllib.parse import quote
+
+    url = f"https://opencode.ai/workspace/{quote(workspace_id)}/go"
+    headers = {
+        "User-Agent": "hermes-agent/1.0",
+        "Accept": "text/html",
+        "Cookie": f"auth={auth_cookie}",
+    }
+    try:
+        response = httpx.get(url, headers=headers, timeout=10.0, follow_redirects=True)
+        response.raise_for_status()
+    except Exception:
+        logger.debug("quota ▸ OpenCode Go dashboard lookup failed", exc_info=True)
+        return None
+
+    fetched_at = _utc_now()
+    windows: list[AccountUsageWindow] = []
+    for field, label in (("rollingUsage", "5h"), ("weeklyUsage", "Weekly"), ("monthlyUsage", "Monthly")):
+        parsed = _parse_opencode_go_window(response.text, field)
+        if parsed is None:
+            continue
+        used_percent, reset_seconds = parsed
+        windows.append(
+            AccountUsageWindow(
+                label=label,
+                used_percent=min(100.0, used_percent),
+                reset_at=fetched_at + timedelta(seconds=reset_seconds),
+            )
+        )
+    if not windows:
+        return None
+    return AccountUsageSnapshot(
+        provider="opencode-go",
+        source="dashboard_scrape",
+        fetched_at=fetched_at,
+        windows=tuple(windows),
+    )
+
+
 def fetch_account_usage(
     provider: Optional[str],
     *,
@@ -737,12 +1194,23 @@ def fetch_account_usage(
             return _fetch_openrouter_account_usage(base_url, api_key)
         if normalized == "deepseek":
             return _fetch_deepseek_account_usage(base_url, api_key)
+        if normalized == "google-antigravity":
+            return _fetch_antigravity_account_usage()
+        if normalized == "opencode-go":
+            return _fetch_opencode_go_quota()
     except Exception:
         return None
     return None
 
 
-_QUOTA_PROVIDER_IDS = ("openai-codex", "anthropic", "openrouter", "deepseek")
+_QUOTA_PROVIDER_IDS = (
+    "openai-codex",
+    "anthropic",
+    "openrouter",
+    "google-antigravity",
+    "deepseek",
+    "opencode-go",
+)
 
 
 def fetch_all_providers_quota() -> list[AccountUsageSnapshot]:

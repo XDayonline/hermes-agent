@@ -119,6 +119,236 @@ def test_render_account_usage_lines_includes_reset_and_provider():
     assert "Credits balance: $9.99" in lines[3]
 
 
+def test_render_account_quota_card_lines_formats_provider_window_and_balance(monkeypatch):
+    now = datetime(2026, 7, 16, 22, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(account_usage, "_utc_now", lambda: now)
+    snapshot = AccountUsageSnapshot(
+        provider="openai-codex",
+        source="usage_api",
+        fetched_at=now,
+        plan="Plus",
+        windows=(
+            AccountUsageWindow(
+                label="Session",
+                used_percent=32,
+                reset_at=datetime(2026, 7, 17, 3, 0, tzinfo=timezone.utc),
+            ),
+        ),
+        details=("Credits balance: $9.99",),
+    )
+
+    lines = account_usage.render_account_quota_card_lines(snapshot)
+
+    assert lines == [
+        "🤖 **OpenAI Codex** · Plus",
+        "🟢 **68% left** · Session",
+        "   ↳ Resets in 5h 0m (2026-07-17 03:00 UTC)",
+        "💳 **Credits balance** · $9.99",
+    ]
+
+
+def test_render_account_quota_card_lines_compacts_nested_quota_details(monkeypatch):
+    now = datetime(2026, 7, 16, 22, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(account_usage, "_utc_now", lambda: now)
+    snapshot = AccountUsageSnapshot(
+        provider="google-antigravity",
+        source="oauth_models_api",
+        fetched_at=now,
+        details=(
+            "Gemini Models",
+            "  Weekly Limit",
+            "    100% left",
+            "    Resets in 6d 23h (2026-07-23 21:00 UTC)",
+            "  Five Hour Limit",
+            "    18% left",
+            "    Resets in 4h 59m (2026-07-17 02:59 UTC)",
+        ),
+    )
+
+    lines = account_usage.render_account_quota_card_lines(snapshot)
+
+    assert lines == [
+        "🧠 **Google Antigravity**",
+        "**Gemini Models**",
+        "• **Weekly Limit** · 🟢 **100% left**",
+        "  ↳ Resets in 6d 23h (2026-07-23 21:00 UTC)",
+        "• **Five Hour Limit** · 🔴 **18% left**",
+        "  ↳ Resets in 4h 59m (2026-07-17 02:59 UTC)",
+    ]
+
+
+def test_render_account_quota_card_lines_ignores_non_finite_percentage_detail():
+    snapshot = AccountUsageSnapshot(
+        provider="example-provider",
+        source="test",
+        fetched_at=datetime.now(timezone.utc),
+        details=("Model limits", "  Weekly", "    inf% left"),
+    )
+
+    lines = account_usage.render_account_quota_card_lines(snapshot)
+
+    assert lines == [
+        "🔹 **Example Provider**",
+        "**Model limits**",
+        "• Weekly",
+        "• inf% left",
+    ]
+
+
+def test_render_account_quota_card_lines_marks_invalid_window_percentages_unavailable():
+    for invalid_percent in (float("inf"), float("-inf"), float("nan"), "bad"):
+        snapshot = AccountUsageSnapshot(
+            provider="example-provider",
+            source="test",
+            fetched_at=datetime.now(timezone.utc),
+            windows=(AccountUsageWindow(label="Session", used_percent=invalid_percent),),
+        )
+
+        lines = account_usage.render_account_quota_card_lines(snapshot)
+
+        assert lines == [
+            "🔹 **Example Provider**",
+            "⚪ **Unavailable** · Session",
+        ]
+
+
+def test_fetch_account_usage_antigravity_renders_weekly_and_five_hour_limits(monkeypatch):
+    monkeypatch.setattr(
+        account_usage,
+        "_utc_now",
+        lambda: datetime(2026, 7, 16, 22, 0, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(
+        "agent.account_usage.resolve_runtime_provider",
+        lambda requested, explicit_base_url=None, explicit_api_key=None: {
+            "provider": "google-antigravity",
+            "api_key": "fake-access-token",
+            "project_id": "my-project",
+        },
+    )
+    monkeypatch.setattr(
+        "agent.antigravity_code_assist.retrieve_user_quota_summary_antigravity",
+        lambda token, project_id="": {
+            "groups": [
+                {
+                    "displayName": "Gemini Models",
+                    "buckets": [
+                        {
+                            "displayName": "Weekly Limit",
+                            "remainingFraction": 0.46,
+                            "resetTime": "2030-01-13T16:39:32Z",
+                        },
+                        {
+                            "displayName": "Five Hour Limit",
+                            "remainingFraction": 0.95,
+                            "resetTime": "2030-01-12T17:32:17Z",
+                        },
+                    ],
+                },
+            ],
+        },
+    )
+
+    snapshot = fetch_account_usage("google-antigravity")
+
+    assert snapshot is not None
+    assert snapshot.provider == "google-antigravity"
+    assert snapshot.source == "oauth_quota_summary_api"
+    assert snapshot.details == (
+        "Gemini Models",
+        "  Weekly Limit",
+        "    46% left",
+        "    Resets in 1276d 18h (2030-01-13 16:39 UTC)",
+        "  Five Hour Limit",
+        "    95% left",
+        "    Resets in 1275d 19h (2030-01-12 17:32 UTC)",
+    )
+
+
+def test_fetch_account_usage_antigravity_keeps_valid_quota_when_reset_is_malformed(monkeypatch):
+    monkeypatch.setattr(
+        "agent.account_usage.resolve_runtime_provider",
+        lambda requested, explicit_base_url=None, explicit_api_key=None: {
+            "provider": "google-antigravity",
+            "api_key": "fake-access-token",
+            "project_id": "my-project",
+        },
+    )
+    monkeypatch.setattr(
+        "agent.antigravity_code_assist.retrieve_user_quota_summary_antigravity",
+        lambda token, project_id="": {
+            "groups": [
+                {
+                    "displayName": "Gemini Models",
+                    "buckets": [
+                        {
+                            "displayName": "Weekly Limit",
+                            "remainingFraction": 0.75,
+                            "resetTime": [],
+                        },
+                        {
+                            "displayName": "Five Hour Limit",
+                            "remainingFraction": 0.5,
+                            "resetTime": 10**30,
+                        },
+                    ],
+                },
+            ],
+        },
+    )
+
+    snapshot = fetch_account_usage("google-antigravity")
+
+    assert snapshot is not None
+    assert snapshot.available
+    assert snapshot.details == (
+        "Gemini Models",
+        "  Weekly Limit",
+        "    75% left",
+        "  Five Hour Limit",
+        "    50% left",
+    )
+
+
+def test_fetch_account_usage_antigravity_ignores_malformed_groups_and_remaining_values(monkeypatch):
+    monkeypatch.setattr(
+        "agent.account_usage.resolve_runtime_provider",
+        lambda requested, explicit_base_url=None, explicit_api_key=None: {
+            "provider": "google-antigravity",
+            "api_key": "fake-access-token",
+            "project_id": "my-project",
+        },
+    )
+    monkeypatch.setattr(
+        "agent.antigravity_code_assist.retrieve_user_quota_summary_antigravity",
+        lambda token, project_id="": {
+            "groups": [
+                None,
+                {"displayName": "Broken", "buckets": "not-a-list"},
+                {
+                    "displayName": "Gemini Models",
+                    "buckets": [
+                        [],
+                        {"displayName": "NaN", "remainingFraction": float("nan")},
+                        {"displayName": "Infinity", "remainingFraction": float("inf")},
+                        {"displayName": "Weekly Limit", "remainingFraction": 0.25},
+                    ],
+                },
+            ],
+        },
+    )
+
+    snapshot = fetch_account_usage("google-antigravity")
+
+    assert snapshot is not None
+    assert snapshot.available
+    assert snapshot.details == (
+        "Gemini Models",
+        "  Weekly Limit",
+        "    25% left",
+    )
+
+
 def test_fetch_account_usage_openrouter_uses_limit_remaining_and_ignores_deprecated_rate_limit(monkeypatch):
     monkeypatch.setattr(
         "agent.account_usage.resolve_runtime_provider",
@@ -223,7 +453,14 @@ def test_fetch_all_providers_quota_discovers_openrouter_without_env_key(monkeypa
 
     snapshots = account_usage.fetch_all_providers_quota()
 
-    assert calls == ["openai-codex", "anthropic", "openrouter", "deepseek"]
+    assert calls == [
+        "openai-codex",
+        "anthropic",
+        "openrouter",
+        "google-antigravity",
+        "deepseek",
+        "opencode-go",
+    ]
     assert snapshots == [openrouter_snapshot]
 
 
@@ -285,3 +522,37 @@ def test_fetch_account_usage_deepseek_derives_balance_endpoint_from_runtime_base
 
     assert snapshot is not None
     assert requested_urls == ["https://deepseek-proxy.example/user/balance"]
+
+
+def test_fetch_account_usage_opencode_go_reads_dashboard_windows(monkeypatch):
+    """The personal-only OpenCode Go scraper exposes parsed dashboard limits."""
+    monkeypatch.setenv("OPENCODE_GO_WORKSPACE_ID", "workspace id")
+    monkeypatch.setenv("OPENCODE_GO_AUTH_COOKIE", "session-cookie")
+    calls = []
+
+    class DashboardResponse:
+        text = "rollingUsage:$R[1]={usagePercent:25,resetInSec:3600} weeklyUsage:$R[2]={resetInSec:7200,usagePercent:40}"
+
+        def raise_for_status(self):
+            return None
+
+    def fake_get(url, headers, timeout, follow_redirects):
+        calls.append((url, headers, timeout, follow_redirects))
+        return DashboardResponse()
+
+    monkeypatch.setattr(account_usage.httpx, "get", fake_get)
+
+    snapshot = fetch_account_usage("opencode-go")
+
+    assert snapshot is not None
+    assert snapshot.provider == "opencode-go"
+    assert [(window.label, window.used_percent) for window in snapshot.windows] == [("5h", 25.0), ("Weekly", 40.0)]
+    assert calls[0][0] == "https://opencode.ai/workspace/workspace%20id/go"
+    assert calls[0][1]["Cookie"] == "auth=session-cookie"
+
+
+def test_fetch_account_usage_opencode_go_skips_missing_dashboard_credentials(monkeypatch):
+    monkeypatch.delenv("OPENCODE_GO_WORKSPACE_ID", raising=False)
+    monkeypatch.delenv("OPENCODE_GO_AUTH_COOKIE", raising=False)
+
+    assert fetch_account_usage("opencode-go") is None
