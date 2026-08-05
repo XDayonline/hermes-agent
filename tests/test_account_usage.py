@@ -349,6 +349,27 @@ def test_fetch_account_usage_antigravity_ignores_malformed_groups_and_remaining_
     )
 
 
+def test_fetch_account_usage_antigravity_reports_unavailable_for_non_dict_payload(monkeypatch):
+    monkeypatch.setattr(
+        "agent.account_usage.resolve_runtime_provider",
+        lambda requested, explicit_base_url=None, explicit_api_key=None: {
+            "provider": "google-antigravity",
+            "api_key": "fake-access-token",
+            "project_id": "my-project",
+        },
+    )
+    monkeypatch.setattr(
+        "agent.antigravity_code_assist.retrieve_user_quota_summary_antigravity",
+        lambda token, project_id="": ["not-a-dict"],
+    )
+
+    snapshot = fetch_account_usage("google-antigravity")
+
+    assert snapshot is not None
+    assert not snapshot.available
+    assert "No quota groups reported." in snapshot.unavailable_reason
+
+
 def test_fetch_account_usage_openrouter_uses_limit_remaining_and_ignores_deprecated_rate_limit(monkeypatch):
     monkeypatch.setattr(
         "agent.account_usage.resolve_runtime_provider",

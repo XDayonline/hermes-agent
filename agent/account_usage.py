@@ -1053,6 +1053,8 @@ def _fetch_deepseek_account_usage(
 
 
 def _antigravity_details_from_quota_summary(payload: dict[str, Any]) -> list[str]:
+    if not isinstance(payload, dict):
+        return []
     raw_groups = payload.get("groups")
     if not isinstance(raw_groups, list):
         return []
