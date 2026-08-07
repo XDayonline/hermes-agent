@@ -392,6 +392,17 @@ def _probe_voice_duration_seconds(path: str) -> Optional[int]:
     return None
 
 
+def telegram_deps_present() -> bool:
+    """PASSIVE probe: is python-telegram-bot importable right now?
+
+    Registry ``check_fn`` — called from status displays and config loading,
+    so it must never install anything.  The ACTIVE lazy-installer
+    (``check_telegram_requirements``) is registered as ``ensure_deps_fn``
+    and runs from ``create_adapter()`` when this returns False (#79812).
+    """
+    return TELEGRAM_AVAILABLE
+
+
 def check_telegram_requirements() -> bool:
     """Check if Telegram dependencies are available.
 
@@ -770,6 +781,7 @@ class TelegramAdapter(BasePlatformAdapter):
         self._drop_delayed_deliveries = False
         self._polling_error_task: Optional[asyncio.Task] = None
         self._polling_conflict_count: int = 0
+        self._polling_conflict_recovery_generation: Optional[int] = None
         self._polling_network_error_count: int = 0
         self._polling_generation: int = 0
         self._polling_progress_event = asyncio.Event()
@@ -2171,7 +2183,10 @@ class TelegramAdapter(BasePlatformAdapter):
             return
         self._polling_progress_event.set()
         self._polling_network_error_count = 0
-        self._polling_conflict_count = 0
+        if generation == self._polling_conflict_recovery_generation:
+            self._polling_conflict_recovery_generation = None
+        else:
+            self._polling_conflict_count = 0
         self._send_path_degraded = False
 
     def _observe_polling_request_result(self, request, generation, result):
@@ -3129,12 +3144,22 @@ class TelegramAdapter(BasePlatformAdapter):
             # AttributeError deep inside start_polling instead of failing fast
             # here, where the except below reschedules or escalates to fatal.
             app = self._app
+            expected_generation = self._polling_generation + 1
+            if not app:
+                raise RuntimeError("Telegram application was torn down during conflict reconnect")
+            # drop_pending_updates=True tells Telegram to terminate any
+            # other active getUpdates sessions for this bot token.  The
+            # competing session is either a zombie from the previous
+            # gateway process (whose long-poll hasn't expired server-side
+            # yet) or our own previous retry's still-expiring session.
+            # Without this, each retry starts a new getUpdates session
+            # that immediately gets 409'd by the previous one, creating
+            # the very conflict we are trying to recover from (#75017).
+            self._polling_conflict_recovery_generation = expected_generation
             try:
-                if not app:
-                    raise RuntimeError("Telegram application was torn down during conflict reconnect")
                 await self._start_polling_once(
                     app,
-                    drop_pending_updates=False,
+                    drop_pending_updates=True,
                     error_callback=self._polling_error_callback_ref,
                 )
                 logger.info(
@@ -3175,6 +3200,9 @@ class TelegramAdapter(BasePlatformAdapter):
                     )
                     return
                 # Fall through to fatal on the last retry.
+            finally:
+                if self._polling_conflict_recovery_generation == expected_generation:
+                    self._polling_conflict_recovery_generation = None
 
         if getattr(self, "_polling_teardown_started", False):
             return
@@ -10561,7 +10589,8 @@ def register(ctx) -> None:
         name="telegram",
         label="Telegram",
         adapter_factory=_build_adapter,
-        check_fn=check_telegram_requirements,
+        check_fn=telegram_deps_present,
+        ensure_deps_fn=check_telegram_requirements,
         is_connected=_is_connected,
         required_env=["TELEGRAM_BOT_TOKEN"],
         install_hint="Run `hermes setup` to install Telegram support.",
