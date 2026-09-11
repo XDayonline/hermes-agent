@@ -100,7 +100,7 @@ class _FakeQuery:
 def telegram_adapter(monkeypatch):
     """Instantiate the Telegram adapter without running the bot constructor."""
     # Stub out the bot construction — we don't want to talk to Telegram.
-    from gateway.platforms import telegram as tg_mod
+    from plugins.platforms.telegram import adapter as tg_mod
 
     # The adapter imported the real python-telegram-bot classes at module
     # load time. Swap them for our fakes at the *attribute* level so the
@@ -481,6 +481,11 @@ def test_ttl_keeps_fresh_state(telegram_adapter):
 # ── Gateway: _resume_to_session_id (no Telegram) ──────────────────────
 
 
+async def _allow_resume(*args, **kwargs):
+    # Stub du garde IDOR, couvert par tests/gateway/test_resume_command.py.
+    return None
+
+
 class _FakeSessionDB:
     def __init__(self):
         self.sessions = {
@@ -488,19 +493,20 @@ class _FakeSessionDB:
             "s2": {"id": "s2", "title": "Another session"},
         }
 
-    def get_session(self, sid):
+    async def get_session(self, sid):
         return self.sessions.get(sid)
 
-    def get_session_title(self, sid):
+    async def get_session_title(self, sid):
         s = self.sessions.get(sid)
         return s.get("title") if s else None
 
-    def resolve_resume_session_id(self, sid):
+    async def resolve_resume_session_id(self, sid):
         # Identity: no compression in the fake.
         return sid
 
 
-def test_resume_to_session_id_dispatches_call(tmp_path):
+@pytest.mark.asyncio
+async def test_resume_to_session_id_dispatches_call(tmp_path):
     """The shared helper must work without an adapter — used by both
     /resume <id> and the picker callback."""
     from gateway.run import GatewayRunner
@@ -526,10 +532,11 @@ def test_resume_to_session_id_dispatches_call(tmp_path):
     runner._release_running_agent_state = lambda key: None
     runner._clear_session_boundary_security_state = lambda key: None
     runner._evict_cached_agent = lambda key: None
+    runner._resume_access_denied_reply = _allow_resume
 
-    result = runner._resume_to_session_id(
+    result = await runner._resume_to_session_id(
         session_key="k",
-        source=SimpleNamespace(),
+        source=SimpleNamespace(platform=Platform.TELEGRAM),
         target_id="s1",
         name="Old session",
     )
@@ -537,7 +544,8 @@ def test_resume_to_session_id_dispatches_call(tmp_path):
     assert runner.session_store.current == "s1"
 
 
-def test_resume_to_session_id_already_on(tmp_path):
+@pytest.mark.asyncio
+async def test_resume_to_session_id_already_on(tmp_path):
     from gateway.run import GatewayRunner
 
     runner = GatewayRunner.__new__(GatewayRunner)
@@ -560,10 +568,11 @@ def test_resume_to_session_id_already_on(tmp_path):
     runner._release_running_agent_state = lambda key: None
     runner._clear_session_boundary_security_state = lambda key: None
     runner._evict_cached_agent = lambda key: None
+    runner._resume_access_denied_reply = _allow_resume
 
-    result = runner._resume_to_session_id(
+    result = await runner._resume_to_session_id(
         session_key="k",
-        source=SimpleNamespace(),
+        source=SimpleNamespace(platform=Platform.TELEGRAM),
         target_id="s1",
         name="s1",
     )

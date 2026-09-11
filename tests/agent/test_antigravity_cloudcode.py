@@ -265,9 +265,12 @@ class TestAntigravityModelCatalog:
             "models": [{"id": "gpt-oss-120b-medium"}],
         }
 
+        # Les IDs upstream reels sont exposes tels quels (pas de renommage);
+        # alias gemini-3.1-pro-high vers gemini-pro-agent applique au dispatch.
         assert parse_agent_model_ids(payload) == [
             "gemini-3-flash-agent",
             "gemini-3.5-flash-low",
+            "gemini-3.1-pro-high",
             "gemini-pro-agent",
             "claude-sonnet-4-6",
         ]

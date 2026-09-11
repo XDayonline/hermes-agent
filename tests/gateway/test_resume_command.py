@@ -240,6 +240,7 @@ class TestHandleResumeCommand:
         assert call_args[0][1] == "old_session_abc"
         db.close()
 
+    @pytest.mark.asyncio
     async def test_resume_all_nonadmin_downgrade_is_announced(self, tmp_path):
         """A non-admin `/resume --all` must say the widening was declined."""
         from hermes_state import SessionDB
