@@ -424,6 +424,15 @@ def _require_token(request: Request) -> None:
 # at the app layer rejects it. See GHSA-ppp5-vxwm-4cf7.
 _LOOPBACK_HOST_VALUES: frozenset = frozenset({"localhost", "127.0.0.1", "::1"})
 
+# Operator-declared tunnel/reverse-proxy hostnames (exact match, opt-in).
+# Restores the fork's DASHBOARD_ALLOWED_HOSTS allowlist on top of upstream's
+# DNS-rebinding guard (GHSA-ppp5-vxwm-4cf7) without a wildcard bypass.
+_EXTERNAL_ALLOWED_HOSTS: frozenset = frozenset(
+    host.strip().lower()
+    for host in os.environ.get("DASHBOARD_ALLOWED_HOSTS", "").split(",")
+    if host.strip()
+)
+
 
 def _dashboard_public_hosts() -> frozenset[str]:
     """Return the exact hostname declared by ``dashboard.public_url``.
@@ -544,7 +553,10 @@ def _is_accepted_host(
         return True
     bound_lc = bound_host.lower()
     if bound_lc in _LOOPBACK_HOST_VALUES:
-        return host_only in _LOOPBACK_HOST_VALUES
+        return (
+            host_only in _LOOPBACK_HOST_VALUES
+            or host_only in _EXTERNAL_ALLOWED_HOSTS
+        )
     return host_only == bound_lc
 
 
