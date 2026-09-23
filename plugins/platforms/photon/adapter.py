@@ -427,6 +427,19 @@ _CONTENT_NORMALIZERS: Dict[Any, Callable[[Dict[str, Any]], _Normalized]] = {
 _BINARY_CONTENT_TYPES = {"attachment", "voice", "group"}  # may decode/cache media bytes → run off the event loop
 
 
+def _mention_gate_text(content: Dict[str, Any]) -> str:
+    """The user-typed text of a payload WITHOUT decoding or caching any attachment bytes,
+    so the group require_mention gate can run before ``_normalize_content`` persists media."""
+    ctype = content.get("type")
+    if ctype == "text":
+        return content.get("text") or ""
+    if ctype == "richlink":
+        return _format_richlink_content(content)
+    if ctype == "group":
+        return "\n".join(part for part in map(_mention_gate_text, _group_item_contents(content)) if part)
+    return ""
+
+
 def _normalize_content(content: Dict[str, Any]) -> _Normalized:
     """Turn a sidecar ``content`` payload into (text, type, media_urls, media_types)."""
     ctype = content.get("type")
@@ -782,15 +795,18 @@ class PhotonAdapter(BasePlatformAdapter):
                 return
             await self.handle_message(_event(choice))
             return
+        # Mention gate BEFORE normalising: _normalize_content persists inline attachment
+        # bytes to the media cache, and a dropped group message must not leave files behind.
+        gated = chat_type == "group" and self.require_mention
+        if gated and not self._message_matches_mention_patterns(_mention_gate_text(content)):
+            logger.debug("[photon] ignoring group message (require_mention=true, no mention pattern matched)")
+            return
         if ctype in _BINARY_CONTENT_TYPES:
             # Base64 decode + media-cache write of possibly multi-MB payloads — keep it off the event loop.
             text, mtype, media_urls, media_types = await asyncio.to_thread(_normalize_content, content)
         else:
             text, mtype, media_urls, media_types = _normalize_content(content)
-        if chat_type == "group" and self.require_mention:
-            if not self._message_matches_mention_patterns(text):
-                logger.debug("[photon] ignoring group message (require_mention=true, no mention pattern matched)")
-                return
+        if gated:
             text = self._clean_mention_text(text)
         self._record_recent_richlink(space_id, _richlink_url_from_content(content) or text)
         await self.handle_message(_event(text, mtype, media_urls=media_urls, media_types=media_types))
@@ -1543,13 +1559,20 @@ def register(ctx) -> None:
         allow_all_env="PHOTON_ALLOW_ALL_USERS", max_message_length=_MAX_MESSAGE_LENGTH, emoji="📱",
         pii_safe=True,  # E.164 phone numbers: redact session descriptions before they reach the LLM
         allow_update_command=True,
+        # Grounded in spectrum-ts markdownToIMessageText + sidecar send-format.mjs: headings -> bold, tables ->
+        # "a | b" rows, code -> Unicode math-monospace; any message containing a URL is sent as raw text.
         platform_hint=(
-            "You are communicating via Photon Spectrum (iMessage). "
-            "Treat replies like regular text messages — short and friendly. "
-            "Markdown is rendered (bold, italics, lists, code), but keep "
-            "formatting light and conversational. Recipient identifiers are "
-            "E.164 phone numbers; never expose them in responses unless the "
-            "user asked. Attachments arrive as metadata only."))
+            "You are texting via iMessage (Photon). Write like a person texting: short and conversational, "
+            "answer first, no preamble or recap. Markdown mostly does not survive here: a message containing "
+            "a link is sent as raw text (every *, #, ``` and | shows literally), headings flatten to bold, "
+            "tables to pipe-separated lines, and backtick or code-block text turns into Unicode look-alike "
+            "glyphs that break when copied. So no headers, tables, code fences or backticks; an occasional "
+            "**bold** word is fine in a message without links. Put a command or code snippet on its own line "
+            "as plain text so it copies and runs. Write links as bare URLs; a message that is only a URL "
+            "sends as a rich preview card. You can send files natively: write MEDIA:/absolute/path/to/file "
+            "in your response (images and video appear inline, audio as voice notes, other files as "
+            "attachments). Recipient identifiers are E.164 phone numbers; never expose them in responses "
+            "unless the user asked."))
     ctx.register_cli_command(
         name="photon", help="Set up and manage the Photon iMessage integration",
         setup_fn=_cli.register_cli, handler_fn=_cli.dispatch)
