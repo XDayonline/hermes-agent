@@ -1542,7 +1542,12 @@ _PROVIDER_CATALOG_FETCHERS: dict[str, Any] = {
     "custom": _custom_catalog,
     "bedrock": _bedrock_catalog,
     "opencode-free": _opencode_free_catalog,
-    "google-antigravity": lambda normalized, force_refresh: _fetch_antigravity_models(force_refresh=force_refresh) or list(_PROVIDER_MODELS.get("google-antigravity", [])),
+    # Antigravity's live Code Assist list can lag the tiers exposed by agy. Keep
+    # the current curated catalog visible and append account-specific live IDs.
+    "google-antigravity": lambda normalized, force_refresh: _merge_unique(
+        list(_PROVIDER_MODELS.get("google-antigravity", [])),
+        _fetch_antigravity_models(force_refresh=force_refresh) or [],
+    ),
     "azure-foundry": _azure_foundry_catalog,
 }
 

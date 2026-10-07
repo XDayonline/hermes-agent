@@ -388,19 +388,30 @@ class TestAntigravityRegistration:
         assert result["project_id"] == "my-proj"
         assert result["email"] == "t@e.com"
 
-    def test_provider_model_ids_uses_live_antigravity_catalog(self, monkeypatch):
+    def test_provider_model_ids_merges_partial_live_antigravity_catalog(self, monkeypatch):
         from hermes_cli import models
 
+        live_only_model = "agy-live-catalog-only-model"
         monkeypatch.setattr(
             models,
             "_fetch_antigravity_models",
-            lambda force_refresh=False: ["gemini-3-flash-agent", "claude-sonnet-4-6"],
+            lambda force_refresh=False: [
+                "gemini-3.6-flash-high",
+                "claude-sonnet-4-6",
+                live_only_model,
+            ],
         )
 
-        assert models.provider_model_ids("agy") == [
-            "gemini-3-flash-agent",
-            "claude-sonnet-4-6",
-        ]
+        model_ids = models.provider_model_ids("agy")
+
+        assert {
+            "gemini-3.8-flash-high",
+            "gemini-3.8-flash-medium",
+            "gemini-3.8-flash-low",
+            live_only_model,
+        }.issubset(model_ids)
+        assert model_ids.count("gemini-3.6-flash-high") == 1
+        assert model_ids.count("claude-sonnet-4-6") == 1
 
     def test_oauth_capable_set_includes_antigravity(self):
         from hermes_cli.auth_commands import _OAUTH_CAPABLE_PROVIDERS

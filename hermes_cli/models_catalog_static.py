@@ -182,8 +182,13 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "gemini-3.1-pro-preview", "gemini-3-pro-preview", "gemini-3.6-flash", "gemini-3.1-flash-lite-preview",
     ],
     "google-antigravity": [
-        "gemini-3.5-flash-extra-low", "gemini-3.5-flash-low", "gemini-3-flash-agent", "gemini-3.1-pro-low",
-        "gemini-pro-agent", "claude-sonnet-4-6", "claude-opus-4-6-thinking", "gpt-oss-120b-medium",
+        "gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low",
+        "gemini-3.7-flash-high", "gemini-3.7-flash-medium", "gemini-3.7-flash-low",
+        "gemini-3.6-flash-high", "gemini-3.6-flash-medium", "gemini-3.6-flash-low",
+        "gemini-3.1-pro-high", "gemini-3.1-pro-low",
+        "claude-sonnet-4-6", "claude-opus-4-6-thinking", "gpt-oss-120b-medium",
+        # Retain legacy routes for accounts that still expose them through live discovery.
+        "gemini-3.5-flash-extra-low", "gemini-3.5-flash-low", "gemini-3-flash-agent", "gemini-pro-agent",
     ],
     "zai": [
         "glm-5.3", "glm-5.3-flash", "glm-5.2", "glm-5.1", "glm-5", "glm-5v-turbo", "glm-5-turbo",
