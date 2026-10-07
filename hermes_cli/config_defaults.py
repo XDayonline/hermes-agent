@@ -1804,6 +1804,16 @@ DEFAULT_CONFIG = {
             # otherwise sends with disable_notification=True and briefs look undelivered). False =
             # silent, no-push deliveries.
             "notify": True,
+            # Optional TypeSafe/Jev post-delivery judgment. Disabled by default: enabling it sends
+            # bounded delivery metadata to TypeSafe, but never lets Jev send, retry, or mark a
+            # delivery successful. The API key belongs in ~/.hermes/.env.
+            "typesafe": {
+                "enabled": False,
+                "model": "jev-latest",
+                "timeout_seconds": 5,
+                "include_content": False,
+                "max_content_chars": 1200,
+            },
         },
         # Make cron deliveries CONTINUABLE (user can reply to a brief with it in context). False
         # keeps deliveries isolated to the job's session; per-job `attach_to_session` overrides.

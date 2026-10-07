@@ -1291,6 +1291,34 @@ def _record_delivery_verification(job: dict, unverified_targets: list) -> None:
         logger.debug("Job '%s': could not record delivery verification: %s", job.get("id"), exc)
 
 
+def _record_typesafe_delivery_judgment(
+    job: dict, *, content: str, delivery_error: Optional[str],
+    unverified_targets: list, queued_targets: list, target_count: int,
+    for_failure: bool, config: Optional[dict] = None,
+) -> None:
+    """Best-effort post-delivery Jev classification.
+
+    The deterministic delivery result is already final before this runs. A provider outage or a
+    malformed Jev response must never change the cron result or the Telegram send path.
+    """
+    try:
+        from cron.typesafe_delivery import evaluate_and_record_delivery
+
+        evaluate_and_record_delivery(
+            job,
+            delivery_error=delivery_error,
+            unverified_targets=list(unverified_targets),
+            queued_targets=list(queued_targets),
+            target_count=target_count,
+            for_failure=for_failure,
+            content=content,
+            config=config,
+        )
+    except Exception as exc:  # pragma: no cover - defensive boundary
+        logger.debug(
+            "Job '%s': TypeSafe delivery judgment skipped: %s", job.get("id", "?"), exc)
+
+
 @dataclass
 class _TargetDelivery:
     """Per-target delivery state shared by the live-adapter and standalone lanes."""
@@ -1912,10 +1940,31 @@ def _deliver_result(
     ``failure_deliver`` override when present (NS-788). Returns None on success, else an error."""
     job.pop("_bot_chat_delivery_receipts", None)
     job.pop("_notification_all_targets_suppressed", None)
+    from gateway.config import load_gateway_config
+
+    # Load the active profile config before any early return. TypeSafe/Jev must also classify
+    # unresolved-target and durable-queue outcomes, not only the normal send path.
+    wrap_response = True
+    user_cfg = None
+    with contextlib.suppress(Exception):
+        user_cfg = _sched.load_config()
+        wrap_response = user_cfg.get("cron", {}).get("wrap_response", True)
+
     targets = _resolve_delivery_targets(job, for_failure=for_failure)
     if not targets:
         _record_delivery_verification(job, [])
-        return _unresolved_delivery_outcome(job, for_failure)
+        error = _unresolved_delivery_outcome(job, for_failure)
+        _record_typesafe_delivery_judgment(
+            job,
+            content=content,
+            delivery_error=error,
+            unverified_targets=[],
+            queued_targets=[],
+            target_count=0,
+            for_failure=for_failure,
+            config=user_cfg,
+        )
+        return error
 
     # Restart-safe workers have no live gateway adapters: hand the send back through a durable
     # queue so the current or replacement gateway performs it with relay/E2EE parity. The execution
@@ -1937,16 +1986,18 @@ def _deliver_result(
         from cron.jobs import get_job
         refreshed = get_job(job["id"]) or {}
         job["last_delivery_queued"] = refreshed.get("last_delivery_queued")
+        _record_typesafe_delivery_judgment(
+            job,
+            content=content,
+            delivery_error=error,
+            unverified_targets=[],
+            queued_targets=list((job.get("last_delivery_queued") or {}).keys()),
+            target_count=len(targets),
+            for_failure=for_failure,
+            config=user_cfg,
+        )
         return error
 
-    from gateway.config import load_gateway_config
-
-    # Wrap with header/footer unless cron.wrap_response: false.
-    wrap_response = True
-    user_cfg = None
-    with contextlib.suppress(Exception):
-        user_cfg = _sched.load_config()
-        wrap_response = user_cfg.get("cron", {}).get("wrap_response", True)
     # Mark live sends FINAL so the platform pushes them (Telegram "important" mode mutes otherwise).
     notify_delivery = _cron_delivery_notify_enabled(user_cfg)
     # Targets acked with NO evidence (bare SendResult(success=True) — Slack/Matrix/Mattermost);
@@ -2053,7 +2104,18 @@ def _deliver_result(
     else:
         delivery_errors.extend(policy_drop_errors)
     _record_delivery_verification(job, unverified_targets)
-    return "; ".join(delivery_errors) if delivery_errors else None
+    error = "; ".join(delivery_errors) if delivery_errors else None
+    _record_typesafe_delivery_judgment(
+        job,
+        content=content,
+        delivery_error=error,
+        unverified_targets=unverified_targets,
+        queued_targets=list((job.get("last_delivery_queued") or {}).keys()),
+        target_count=len(targets),
+        for_failure=for_failure,
+        config=user_cfg,
+    )
+    return error
 
 
 # Late-bound origin namespace (see module docstring). Imported LAST so this module is fully

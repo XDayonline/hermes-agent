@@ -565,6 +565,36 @@ When scheduling jobs, you specify where the output goes:
 | `"telegram,discord"` | Fan out to a specific set of channels | Comma-separated list |
 | `"origin,all"` | Deliver to the origin **plus** every other connected channel | Combine any tokens |
 
+### Optional TypeSafe/Jev delivery judgment
+
+Hermes can ask TypeSafe's Jev to classify the outcome **after** the deterministic delivery
+check has completed. Jev cannot send, retry, suppress, or mark a message as delivered; the
+gateway's adapter result remains authoritative. The structured result is stored on the job as
+`last_delivery_judgment` for a future digest/notification aggregator.
+
+The feature is disabled by default. Store the API key in the profile secret file printed by
+`hermes config env-path` (normally `~/.hermes/.env`), never in `config.yaml` or a job prompt:
+
+```text
+TYPESAFE_API_KEY=<your-key>
+```
+
+Then opt in from `config.yaml`:
+
+```yaml
+cron:
+  delivery:
+    typesafe:
+      enabled: true
+      model: jev-latest
+      timeout_seconds: 5
+      include_content: false   # opt in explicitly before sending cron text to TypeSafe
+```
+
+Jev receives bounded delivery metadata by default: job identity, target count, queue state,
+unverified targets, and the exact delivery error category. A provider outage is recorded as a
+judgment error and never turns an otherwise successful cron delivery into a failed run.
+
 The agent's final response is automatically delivered to the configured `deliver:` target — the agent does not send messages itself, so there is nothing to call in the cron prompt.
 
 Delivered output is secret-redacted on the way out, on every lane: the platform message, the

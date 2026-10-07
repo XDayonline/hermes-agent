@@ -179,6 +179,23 @@ def _run(job, content, send_result, relay=False, standalone_result=None, cron_cf
     return error, router_calls, standalone_calls
 
 
+def test_no_targets_passes_active_config_to_typesafe():
+    config = {"cron": {"wrap_response": False, "delivery": {"typesafe": {"enabled": True}}}}
+    recorded = {}
+
+    def record_judgment(*args, **kwargs):
+        recorded.update(kwargs)
+
+    with patch("cron.scheduler.load_config", return_value=config), \
+         patch("cron.scheduler_delivery._resolve_delivery_targets", return_value=[]), \
+         patch("cron.scheduler_delivery._record_delivery_verification"), \
+         patch("cron.scheduler_delivery._record_typesafe_delivery_judgment", side_effect=record_judgment):
+        error = _deliver_result(_job(), "Nightly report.")
+
+    assert error is None
+    assert recorded["config"] == config
+
+
 class TestFilteredResultIsNotDelivered:
     FILTERED = {"success": True, "filtered": "silence_narration", "delivered": False}
 

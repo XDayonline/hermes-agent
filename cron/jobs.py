@@ -1810,6 +1810,8 @@ def create_job(
         "last_delivery_error": None,
         # Targets acked without message_id/raw_response (accepted but UNVERIFIED).
         "last_delivery_unverified": None,
+        # Optional structured TypeSafe/Jev classification of the deterministic delivery outcome.
+        "last_delivery_judgment": None,
         "failure_streak": 0,
         "deliver": deliver,
         "origin": origin,  # Tracks where job was created for "origin" delivery
