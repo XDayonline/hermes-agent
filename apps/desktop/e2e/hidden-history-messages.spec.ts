@@ -9,21 +9,21 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 
-import {
-  buildAppEnv,
-  createSandbox,
-  launchDesktop,
-  type MockBackendFixture,
-  waitForAppReady,
-  writeEnvFile,
-  writeMockProviderConfig,
-} from './fixtures'
+import { writeEnvFile, writeMockProviderConfig } from '../../../tests-js/scripts/mock-provider-config'
 import {
   MOCK_REPLY,
   startMockServer,
   VERIFICATION_STOP_TEXT,
   VERIFICATION_STOP_TRIGGER,
 } from '../../../tests-js/scripts/mock-server'
+
+import {
+  buildAppEnv,
+  createSandbox,
+  launchDesktop,
+  type MockBackendFixture,
+  waitForAppReady,
+} from './fixtures'
 import { RealSessionBuilder } from './real-session-builder'
 import { expect, test } from './test'
 
@@ -72,7 +72,7 @@ async function setupSeededMockBackend(): Promise<MockBackendFixture> {
   }
 }
 
-test('resume hides real context-compaction handoffs', async ({}, testInfo) => {
+test('resume hides real context-compaction handoffs', async (_fixtures, testInfo) => {
   const fixture = await setupSeededMockBackend()
 
   try {
@@ -97,7 +97,7 @@ test('resume hides real context-compaction handoffs', async ({}, testInfo) => {
   }
 })
 
-test('live verify-on-stop continuations stay out of the transcript', async ({}, testInfo) => {
+test('live verify-on-stop continuations stay out of the transcript', async (_fixtures, testInfo) => {
   const sandbox = createSandbox('live-verification-nudge')
   const projectRoot = path.join(sandbox.root, 'project')
   const changedFile = path.join(projectRoot, 'e2e-verification-target.py')

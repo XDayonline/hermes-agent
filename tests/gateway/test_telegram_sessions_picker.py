@@ -520,9 +520,12 @@ async def test_resume_to_session_id_dispatches_call(tmp_path):
         def get_or_create_session(self, source):
             return SimpleNamespace(session_id=self.current)
 
-        def switch_session(self, key, target):
+        def switch_session(self, key, target, *, preserve_prompt_pin=True):
             self.current = target
             return SimpleNamespace(session_id=target)
+
+        def set_model_override(self, key, model):
+            return None
 
         def load_transcript(self, sid):
             return [{"role": "user"}, {"role": "assistant"}] * 3
@@ -534,6 +537,7 @@ async def test_resume_to_session_id_dispatches_call(tmp_path):
     runner._evict_cached_agent = lambda key: None
     runner._resume_access_denied_reply = _allow_resume
 
+    runner._clear_conversation_scope = lambda session_key, *, reason: None
     result = await runner._resume_to_session_id(
         session_key="k",
         source=SimpleNamespace(platform=Platform.TELEGRAM),
@@ -557,7 +561,7 @@ async def test_resume_to_session_id_already_on(tmp_path):
         def get_or_create_session(self, source):
             return SimpleNamespace(session_id=self.current)
 
-        def switch_session(self, key, target):
+        def switch_session(self, key, target, *, preserve_prompt_pin=True):
             return None
 
         def load_transcript(self, sid):

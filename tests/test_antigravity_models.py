@@ -15,10 +15,12 @@ def test_antigravity_catalog_exposes_user_visible_tiers():
     assert "gemini-3.1-pro-low" in models             # Pro Low
     assert "gemini-pro-agent" in models               # Pro High
 
-    # Synthetic renamed IDs we previously invented must NOT appear
+    # Synthetic renamed Flash IDs we previously invented must NOT appear.
     assert "gemini-3.5-flash-medium" not in models
     assert "gemini-3.5-flash-high" not in models
-    assert "gemini-3.1-pro-high" not in models
+
+    # Keep the legacy Pro high alias available for backward compatibility.
+    assert "gemini-3.1-pro-high" in models
 
 
 def test_antigravity_flash_tiers_route_to_upstream_ids():

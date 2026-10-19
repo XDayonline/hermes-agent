@@ -14,16 +14,16 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 
+import { writeEnvFile, writeMockProviderConfig } from '../../../tests-js/scripts/mock-provider-config'
+import { type MockServer, startMockServer } from '../../../tests-js/scripts/mock-server'
+
 import {
   buildAppEnv,
   createSandbox,
   launchDesktop,
   type Sandbox,
   waitForAppReady,
-  writeEnvFile,
-  writeMockProviderConfig,
 } from './fixtures'
-import { type MockServer, startMockServer } from '../../../tests-js/scripts/mock-server'
 import { RealSessionBuilder } from './real-session-builder'
 import { type ElectronApplication, expect, type Page, test } from './test'
 
@@ -164,7 +164,7 @@ test.describe('attached image resume', () => {
     fixture = null
   })
 
-  test('renders a persisted attachment as a thumbnail on first open and after a cold reload', async ({}, testInfo) => {
+  test('renders a persisted attachment as a thumbnail on first open and after a cold reload', async (_fixtures, testInfo) => {
     // Seeding through the real gateway plus two full app boots does not fit the
     // default per-test budget on a cold runner.
     test.slow()
