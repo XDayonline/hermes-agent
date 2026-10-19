@@ -92,3 +92,12 @@ test("a guarded next-turn pick's confirmed resend carries the owner's token from
 
   expect(calls[0].params.payload).toEqual({ model: 'guarded', provider: 'custom', confirm: 'owner-token' })
 })
+
+test("a deferred pick's confirmation resends its whole selection (reasoning included) with the owner's token", async () => {
+  const { calls, client } = await attached(params => ({ session_id: 's', operation: 'model', model: (params.payload as { model: string }).model, revision: 5 }))
+
+  await client.request('session.model', { session_id: 's', payload: { model: 'guarded', provider: 'custom', reasoning: 'high' }, confirm: 'owner-token' })
+
+  expect(calls).toEqual([{ method: 'session.mutate', params: expect.objectContaining({
+    operation: 'model', payload: { model: 'guarded', provider: 'custom', reasoning: 'high', confirm: 'owner-token' }, expected_generation: 2 }) }])
+})

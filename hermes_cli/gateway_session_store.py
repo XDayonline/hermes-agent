@@ -19,6 +19,7 @@ import argparse
 import logging
 import os
 import re
+import sys
 import uuid
 
 from hermes_cli.gateway_client import GatewayClientError
@@ -33,6 +34,7 @@ _READS = frozenset({
     "is_kanban_owned_session", "list_sessions_rich", "search_sessions", "get_next_title_in_lineage",
     "get_handoff_state", "get_meta", "get_compression_tip", "resolve_session_by_title", "get_messages",
     "session_count", "sanitize_title", "session_yolo_enabled",
+    "get_session_model_config_value",
 })
 # Writes the gateway already performs itself (persistence, accounting, maintenance).
 _GATEWAY_OWNED = frozenset({
@@ -60,11 +62,14 @@ class GatewaySessionStore:
     """Truthy until the viewer's gateway connection is final (main's ``if self._session_db:`` guards);
     a gateway hang-up stays truthy, and the next call redials."""
 
+    current: dict | None = None  # the opened session's snapshot; never ``__getattr__``'s refusal
+
     def __init__(self, connection=None):
         self.connection = connection or GatewayConnection.shared()
         self.snapshots: dict[str, dict] = {}
         self.current: dict | None = None
         self._reader = None
+        self._create_parameters = None
 
     def __bool__(self):
         return not self.connection.final
@@ -116,20 +121,26 @@ class GatewaySessionStore:
         self.connection.state(sid).adopt_snapshot(snapshot)
         return sid
 
-    def attach(self, session_id):
-        """``session.resume`` once per session id this viewer uses (idempotent)."""
+    def attach(self, session_id, *, typed=False):
+        """``session.resume`` once per session id this viewer uses (idempotent), carrying this CLI's launch
+        key as the thin client does (``GatewayConnection.resume``, the reconnect's too). A session that does
+        not take the key (a keyed startup alias resuming a Desktop/TUI session) attaches as is. ``typed``
+        (only :meth:`open_session`'s startup resume, where the user typed ``--api-key`` for that session)
+        refuses it instead, as the thin client does."""
         if session_id in self.snapshots:
             return self.snapshots[session_id]
-        snapshot = self.call("session.resume", session_id=session_id)
+        snapshot = self.connection.resume(self.call, session_id, typed=typed)
         self._adopt(snapshot)
         return snapshot
 
     def open_session(self, cli, launch=None):
         """Create (or resume) the gateway session for this CLI and adopt its id. A resume target the
         gateway does not know is left as is: main's own "Session not found" path reports it."""
+        key = self.connection.launch_api_key = (launch or {}).get("api_key") or None
+        self.connection.launch_api_key_typed = key is not None and key == getattr(cli, "_typed_api_key", None)
         if getattr(cli, "_resumed", False):
             try:
-                snapshot = self.attach(cli.session_id)
+                snapshot = self.attach(cli.session_id, typed=self.connection.launch_api_key_typed)
             except GatewayClientError as exc:
                 if str(exc) in {"not_found", "permission_denied"}:
                     return None
@@ -156,8 +167,21 @@ class GatewaySessionStore:
         params["row_cwd"] = os.getcwd() if record_cwd and local and params["source"] in CLI_FAMILY_SOURCES else ""
         if title:
             params["title"] = title
+        params.update(self.client_env())
         snapshot = self.call("session.create", request_id=uuid.uuid4().hex, **params)
+        warning = (snapshot.get("info") or {}).get("config_warning")
+        if warning:
+            print(f"Warning: {warning}", file=sys.stderr)
         return self._adopt(snapshot)
+
+    def client_env(self):
+        """This shell's ``client_env`` when the gateway takes it (one ``runtime.describe`` per store)."""
+        from hermes_cli.gateway_chat import client_env_policy
+        if self._create_parameters is None:
+            described = self.call("runtime.describe")
+            contract = described.get("session_create") if isinstance(described, dict) else None
+            self._create_parameters = list((contract or {}).get("parameters") or [])
+        return client_env_policy(self._create_parameters)
 
     def branch(self, session_id, title=None):
         """``session.mutate branch``: the gateway forks the whole active transcript into a child it
@@ -206,7 +230,7 @@ class GatewaySessionStore:
         from hermes_state_rewind import (
             _HISTORY_CHANGED, RewindOutcome, RewindTargetUnavailableError, _comparison_content, _user_indices)
         snapshot = self.call("session.resume", session_id=session_id)
-        durable = list(snapshot.get("messages") or [])
+        durable = [m for m in snapshot.get("messages") or [] if not m.get("archived")]  # the live rows
         durable_user = _user_indices(durable)
         if user_ordinal < 0:
             user_ordinal = max(len(durable_user) + user_ordinal, 0)
@@ -273,6 +297,8 @@ class GatewaySessionStore:
             try:
                 # Hung up: redial first, so the detach names the subscription the reconnect resumed.
                 self.connection.start()
+                if state.gaps != state.attached_gaps:  # a replay gap retired it: re-attach, so the detach lands
+                    self.connection.reattach(session_id)
             except GatewayClientError as exc:
                 logger.debug("redial for session.detach failed: %s", exc)
                 reachable = False
@@ -459,7 +485,9 @@ def create_titled_session(title):
     params["source"] = "cli"  # main's titled row is `cli` (hermes_cli.main._create_titled_session)
     params["row_cwd"] = ""
     try:
-        snapshot = session_store().call("session.create", request_id=uuid.uuid4().hex, title=title, **params)
+        store = session_store()
+        params.update(store.client_env())
+        snapshot = store.call("session.create", request_id=uuid.uuid4().hex, title=title, **params)
     except GatewayClientError as exc:
         logger.warning("Failed to create titled session %r on the gateway: %s", title, exc)
         return None

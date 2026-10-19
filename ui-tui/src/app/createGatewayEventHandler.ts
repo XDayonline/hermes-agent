@@ -47,8 +47,8 @@ import { markBubbleShown, newlyStartedRows } from './pendingBubbles.js'
 import { flashGoodVibes, flashPet } from './petFlashStore.js'
 import { forgetServerRequest } from './serverRequestStore.js'
 import { noteCanonicalCompletion } from './slash/canonicalSessionCommands.js'
-import { mutateCanonicalSession } from './slash/canonicalSessionControls.js'
-import { loadSlashCatalog } from './slashCatalog.js'
+import { mutateCanonicalSession, openModelConfirmation } from './slash/canonicalSessionControls.js'
+import { loadSlashCatalog, refreshSlashCatalogOnSkillsChange } from './slashCatalog.js'
 import { reportStartupLatency } from './startupLatency.js'
 import { markNextSubmitVoice } from './submissionCore.js'
 import { captureDestination, isCurrentDestination } from './submissionDestination.js'
@@ -579,8 +579,8 @@ function handleErrorEvent(
 /** Live usage tick while a turn runs (see tui_gateway _start_usage_ticker): keeps the status-bar
  *  context window current mid-turn instead of only at message.complete. The session filter at the
  *  top of the handler already dropped ticks for non-focused sessions. */
-function applyUsageTick(payload: unknown): void {
-  const usage = usageFromTick(payload as Parameters<typeof usageFromTick>[0]) // canonical: the owner's counters at the top level
+function applyUsageTick(payload: Extract<AnyGatewayEvent, { type: 'session.usage' }>['payload']): void {
+  const usage = usageFromTick(payload) // canonical: the owner's counters at the top level
 
   if (usage) {
     patchUiState(state => ({ ...state, usage: { ...state.usage, ...usage } }))
@@ -613,29 +613,22 @@ function applyDeferredPickOutcome(
   }
 
   if (update.status === 'confirmation_required' && typeof update.confirm === 'string') {
-    const pick = (update.payload ?? {}) as { model?: string; provider?: string }
-    const arg = `${pick.model ?? ''}${pick.provider ? ` --provider ${pick.provider}` : ''}`
+    const pick = (update.payload ?? {}) as { model?: string; provider?: string; reasoning?: string }
+    // The confirmed resend is the same selection: its level commits with the model.
+    const arg = `${pick.model ?? ''}${pick.provider ? ` --provider ${pick.provider}` : ''}${pick.reasoning ? ` --reasoning ${pick.reasoning}` : ''}`
 
-    patchOverlayState({
-      confirm: {
-        cancelLabel: t('slashCmd.session.model.cancel'),
-        confirmLabel: t('slashCmd.session.model.switchAnyway'),
-        danger: true,
-        detail: (update.confirm_message as string | undefined) || t('slashCmd.session.model.expensiveDetail'),
-        onConfirm: () =>
-          void mutateCanonicalSession(gw, sid, 'model', arg, undefined, update.confirm as string).then(
-            mutation => {
-              // Refused again (a queued turn or another pick moved the session first): say so once,
-              // never re-ask in a loop.
-              if (mutation?.result.status === 'confirmation_required') {
-                sys(t('slashCmd.session.model.confirmStale'))
-              }
-            },
-            (error: unknown) => sys(`error: ${error instanceof Error ? error.message : String(error)}`)
-          ),
-        title: t('slashCmd.session.model.confirmTitle', String(update.target_model ?? pick.model ?? ''))
-      }
-    })
+    openModelConfirmation(update.confirm_message as string | undefined, String(update.target_model ?? pick.model ?? ''), () =>
+      void mutateCanonicalSession(gw, sid, 'model', arg, undefined, update.confirm as string).then(
+        mutation => {
+          // Refused again (a queued turn or another pick moved the session first): say so once,
+          // never re-ask in a loop.
+          if (mutation?.result.status === 'confirmation_required') {
+            sys(t('slashCmd.session.model.confirmStale'))
+          }
+        },
+        (error: unknown) => sys(`error: ${error instanceof Error ? error.message : String(error)}`)
+      )
+    )
   }
 }
 
@@ -1048,6 +1041,33 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
       })
   }
 
+  type NoticeEventPayload = Extract<AnyGatewayEvent, { type: 'notification.show' }>['payload']
+
+  const showGatewayNotice = (p: NoticeEventPayload) => {
+    if (!p?.text) {
+      return
+    }
+
+    // A notice with a full question (the low-disk auto-prune prompt) prints it into the
+    // transcript once: the status slot is one truncated line and would drop the commands.
+    if (typeof p.detail === 'string' && p.detail.trim()) {
+      sys(p.detail)
+    }
+
+    turnController.showNotice({
+      id: p.id ?? undefined,
+      key: p.key ?? undefined,
+      kind: p.kind === 'ttl' ? 'ttl' : 'sticky',
+      level: isNoticeLevel(p.level) ? p.level : 'info',
+      text: p.text,
+      ttl_ms: p.ttl_ms ?? null
+    })
+  }
+
+  // Shared-control settles and the skills.changed catalog refetch need no per-event state.
+  const handledBeforeSwitch = (ev: AnyGatewayEvent) =>
+    settleSharedPrompt(ev) || refreshSlashCatalogOnSkillsChange(ev, rpc, setCatalog)
+
   return (ev: AnyGatewayEvent) => {
     const sid = getUiState().sid
 
@@ -1062,7 +1082,7 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
       return
     }
 
-    if (settleSharedPrompt(ev)) {
+    if (handledBeforeSwitch(ev)) {
       return
     }
 
@@ -1223,20 +1243,7 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         // wire and stays snake_case in UiState.notice (no mapping layer). The
         // text already carries its own glyph; turnController decides whether to
         // show now or hold until turn end (FaceTicker wins while busy).
-        const p = ev.payload
-
-        if (!p?.text) {
-          return
-        }
-
-        turnController.showNotice({
-          id: p.id ?? undefined,
-          key: p.key ?? undefined,
-          kind: p.kind === 'ttl' ? 'ttl' : 'sticky',
-          level: isNoticeLevel(p.level) ? p.level : 'info',
-          text: p.text,
-          ttl_ms: p.ttl_ms ?? null
-        })
+        showGatewayNotice(ev.payload)
 
         return
       }
@@ -1331,7 +1338,11 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
           }
 
           setVoiceEnabled(true)
-          await rpc('voice.toggle', { action: 'on' })
+          // A shared-owner session's voice mode is the owner's per-session /voice state (T9), the
+          // one voice.record gates on; the sidecar's voice.toggle flips only its global flag.
+          await (gw.isCanonical
+            ? gw.request('slash.exec', { command: 'voice on', session_id: sid })
+            : rpc('voice.toggle', { action: 'on' }))
           await rpc('voice.record', { action: 'start', session_id: sid })
         })().catch((e: unknown) => {
           sys(t('gatewayMsg.wake.failed', rpcErrorMessage(e)))

@@ -23,7 +23,8 @@ def _owner(tmp_path, monkeypatch, handle):
     store = SessionStore(tmp_path / 'sessions', GatewayConfig())
     db = store._db
     runner = SimpleNamespace(session_store=store, _session_db=db, adapters={}, _draining=False,
-                             _evict_cached_agent=lambda route: None, _handle_message=handle,
+                             _evict_cached_agent=lambda route: None, _cached_agent_for=lambda route: None,
+                             _handle_message=handle,
                              _resolve_session_agent_runtime=lambda **k: ('frozen', {}))
     runner._adapter_for_source = lambda source: runner.adapters.get(source.platform)
     authority = SessionAuthority(runner, profile_id='owned', instance_id='owner', db=db,
@@ -374,5 +375,129 @@ async def test_a_deferred_pick_that_raises_is_refused_and_the_queue_keeps_draini
                                                  'target_model': 'boom', 'model': 'frozen'}.items()
     finally:
         release.set()
+        await owner.close()
+        store.close_all_db_handles()
+
+
+@pytest.mark.asyncio
+async def test_a_deferred_model_and_reasoning_pick_commits_both_together(tmp_path, monkeypatch):
+    from gateway.session_contract import Submission
+    from gateway.session_policy import policy_for_source
+    started, release = threading.Event(), asyncio.Event()
+    seen = []
+    state = {}
+
+    async def handle(event):
+        live = state['authority'].sessions[state['ref'].session_id]
+        effort = policy_for_source(state['authority'].runner, live.source).reasoning_config
+        seen.append((event.text, _running_model(state['authority'], state['ref']), (effort or {}).get('effort')))
+        if event.text == 'RUNNING':
+            started.set()
+            await release.wait()
+        return 'ok'
+    store, db, authority, owner, ref = _owner(tmp_path, monkeypatch, handle)
+    state.update(authority=authority, ref=ref)
+    authority.runner._set_session_reasoning_override = lambda *a: None
+    try:
+        await authority.submit(owner.actor, Submission('running', ref, {'text': 'RUNNING'}, 'queue'))
+        await async_wait_until(started.is_set, timeout=10, what='the first turn is running')
+        snap = db.get_session(ref.session_id)
+        reply = await owner.dispatch({'id': 1, 'method': 'session.mutate', 'params': {
+            'session_id': ref.session_id, 'request_id': 'pick', 'expected_revision': snap['runtime_revision'],
+            'expected_generation': snap['runtime_generation'], 'operation': 'model',
+            'payload': {'model': 'picked', 'reasoning': 'high'}}})
+        assert reply.get('result', {}).get('status') == 'deferred', reply
+        release.set()
+        await _run_turn(authority, owner, db, ref, 'NEXT')
+        assert seen[-1] == ('NEXT', 'picked', 'high'), seen
+    finally:
+        release.set()
+        await owner.close()
+        store.close_all_db_handles()
+
+
+@pytest.mark.asyncio
+async def test_a_reasoning_command_during_a_running_turn_is_committed_for_the_next_turn(tmp_path, monkeypatch):
+    """Desktop's and Ink's ``/reasoning <level> --global`` and ``/reasoning reset`` while a turn runs reach
+    the owner as ``config.set``: run by the messaging handler as on main (never refused ``session_busy``),
+    then committed to the session's policy when the turn ends, so the next turn and an owner restart run
+    them. A messaging chat viewed in Desktop has no policy: its handler alone runs, as on main."""
+    from gateway.config import Platform
+    from gateway.session import SessionSource
+    from gateway.session_authority import LiveSession
+    from gateway.session_contract import Submission
+    from gateway.session_policy import policy_for_source
+    started, release = threading.Event(), asyncio.Event()
+    seen, handled, state = [], [], {}
+
+    async def handle(event):
+        live = state['authority'].sessions[state['ref'].session_id]
+        seen.append((policy_for_source(state['authority'].runner, live.source).reasoning_config or {}).get('effort'))
+        if event.text == 'RUNNING':
+            started.set()
+            await release.wait()
+        return 'ok'
+    monkeypatch.chdir(tmp_path)  # the handler's profile scope is the owner's relative profile id
+    store, db, authority, owner, ref = _owner(tmp_path, monkeypatch, handle)
+    state.update(authority=authority, ref=ref)
+    authority.runner._set_session_reasoning_override = lambda *a: None
+    authority.runner._apply_reasoning_selection = lambda route, platform, value, persist_global=False: handled.append(value)
+    db.create_session('telegram-row', 'telegram')
+    authority.sessions['telegram-row'] = LiveSession(SessionSource(platform=Platform.TELEGRAM, chat_id='42'), 'tg:42')
+    try:
+        for value, scope in (('minimal', 'global'), ('reset', 'session')):
+            started.clear()
+            release.clear()
+            await authority.submit(owner.actor, Submission('run-' + value, ref, {'text': 'RUNNING'}, 'queue'))
+            await async_wait_until(started.is_set, timeout=10, what='a turn is running')
+            for sid in (ref.session_id, 'telegram-row'):
+                reply = await owner.dispatch({'id': 1, 'method': 'config.set', 'params': {
+                    'session_id': sid, 'key': 'reasoning', 'value': value, 'scope': scope}})
+                assert reply.get('result', {}).get('value') == value, reply
+            release.set()
+            await _run_turn(authority, owner, db, ref, 'NEXT-' + value)
+        assert handled == ['minimal', 'minimal', 'reset', 'reset']
+        assert seen[1:] == ['minimal', 'minimal', seen[0]] and seen[0] != 'minimal', seen
+    finally:
+        release.set()
+        await owner.close()
+        store.close_all_db_handles()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('conflicts', [1, 99], ids=['moved-once', 'keeps-moving'])
+async def test_a_reasoning_command_raced_by_another_mutation_is_not_refused(tmp_path, monkeypatch, conflicts):
+    """Review of #140969: ``/reasoning high`` on an idle session whose fence another viewer's mutation just
+    moved (``revision_conflict``) failed the command, where main always applied it. The fence moving is not
+    a verdict on this command: it re-reads the fences and commits; a fence that keeps moving defers it to the
+    next boundary like a busy session."""
+    from gateway import session_mutations
+    from gateway.session_policy import policy_for_source
+    from hermes_state_runtime import RuntimeStoreError
+
+    async def handle(event):
+        return 'ok'
+    monkeypatch.chdir(tmp_path)
+    store, _db, authority, owner, ref = _owner(tmp_path, monkeypatch, handle)
+    authority.runner._set_session_reasoning_override = lambda *a: None
+    authority.runner._apply_reasoning_selection = lambda *a, **k: 'ok'
+    real, raced = session_mutations.mutate_session, []
+
+    async def racing(authority_, actor, ref_, params, *a, **k):
+        if params.get('operation') == 'reasoning' and len(raced) < conflicts:
+            raced.append(params['expected_revision'])
+            raise RuntimeStoreError('revision_conflict')
+        return await real(authority_, actor, ref_, params, *a, **k)
+    monkeypatch.setattr(session_mutations, 'mutate_session', racing)
+    try:
+        reply = await owner.dispatch({'id': 1, 'method': 'config.set', 'params': {
+            'session_id': ref.session_id, 'key': 'reasoning', 'value': 'high', 'scope': 'session'}})
+        assert reply.get('result', {}).get('value') == 'high', reply
+        live = authority.sessions[ref.session_id]
+        if conflicts == 1:
+            assert (policy_for_source(authority.runner, live.source).reasoning_config or {}).get('effort') == 'high'
+        else:
+            assert live.pending_reasoning == (owner.actor.subject, 'high')
+    finally:
         await owner.close()
         store.close_all_db_handles()

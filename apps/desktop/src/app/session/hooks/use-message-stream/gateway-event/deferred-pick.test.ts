@@ -7,9 +7,11 @@ import type { GatewayEventContext } from './types'
 
 const notifyError = vi.hoisted(() => vi.fn())
 const surfaceModelSwitchConfirm = vi.hoisted(() => vi.fn(async () => true))
+const requestGatewayForAgent = vi.hoisted(() => vi.fn(async () => ({})))
 
 vi.mock('@/store/notifications', async importOriginal => ({ ...(await importOriginal<object>()), notifyError }))
 vi.mock('@/lib/guarded-model-switch', () => ({ surfaceModelSwitchConfirm }))
+vi.mock('@/store/gateway', async importOriginal => ({ ...(await importOriginal<object>()), requestGatewayForAgent }))
 
 function context(payload: Record<string, unknown>, overrides: Record<string, unknown> = {}) {
   const states: Record<string, Record<string, unknown>> = { s: { model: 'picked', provider: 'custom' } }
@@ -108,5 +110,21 @@ describe('handleDeferredPickEvent', () => {
     expect([$currentModel.get(), $currentProvider.get()]).toEqual(['picked', 'custom'])
     expect(states.s).toMatchObject({ model: 'picked', provider: 'custom' })
     expect((ctx.deps.queryClient.invalidateQueries as any).mock.calls[0][0].queryKey).toContain('other')
+  })
+
+  it('confirming a combined model + reasoning pick resends the whole selection with the owner token', async () => {
+    surfaceModelSwitchConfirm.mockImplementationOnce((async (options: { requestConfirmed: () => Promise<unknown> }) => {
+      await options.requestConfirmed()
+
+      return true
+    }) as never)
+
+    const { ctx } = context({ confirm: 'token', operation: 'model', payload: { model: 'guarded', provider: 'custom', reasoning: 'high' },
+      session_id: 's', status: 'confirmation_required', target_model: 'guarded' })
+
+    handleDeferredPickEvent(ctx)
+    await vi.waitFor(() => expect(requestGatewayForAgent).toHaveBeenCalled())
+    expect(requestGatewayForAgent).toHaveBeenCalledWith(null, 'default', 'session.model', {
+      confirm: 'token', payload: { model: 'guarded', provider: 'custom', reasoning: 'high' }, session_id: 's' })
   })
 })

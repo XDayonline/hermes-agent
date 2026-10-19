@@ -61,7 +61,7 @@ export function handleDeferredPickEvent(ctx: GatewayEventContext): boolean {
   }
 
   if (update.status === 'confirmation_required' && typeof update.confirm === 'string') {
-    const pick = (update.payload ?? {}) as { model?: string; provider?: string }
+    const pick = (update.payload ?? {}) as { model?: string; provider?: string; reasoning?: string }
     const connectionId = event.connectionId ?? activeGatewayConnectionId()
     const before = { model: $currentModel.get(), provider: $currentProvider.get() }
     const target = String(update.target_model ?? pick.model ?? '')
@@ -73,16 +73,10 @@ export function handleDeferredPickEvent(ctx: GatewayEventContext): boolean {
       // A newer pick replaced this one while the dialog was open: confirming it would undo that pick.
       isStale: () => $currentModel.get() !== before.model || $currentProvider.get() !== before.provider,
       model: target,
-      // The protocol attaches the owner's token (kept from this event) to the same target's resend.
+      // The whole selection the owner asked about (its reasoning level included) with the owner's
+      // token: the same canonical model mutation the TUI resends.
       requestConfirmed: () =>
-        requestGatewayForAgent(
-          connectionId,
-          profile,
-          pick.provider ? 'config.set' : 'slash.exec',
-          pick.provider
-            ? { session_id: sessionId, key: 'model', value: `${pick.model} --provider ${pick.provider} --session`, confirm_expensive_model: true }
-            : { session_id: sessionId, command: `/model ${pick.model}`, confirm_expensive_model: true }
-        ),
+        requestGatewayForAgent(connectionId, profile, 'session.model', { confirm: update.confirm, payload: pick, session_id: sessionId }),
       finish: invalidate
     }).then(applied => {
       // Declined, or the confirmed resend failed: the committed model is still the session's.
