@@ -24,8 +24,12 @@ DISCONNECTED = ("Gateway disconnected; turn outcome is unknown. Resume the print
                 "whether it completed or was interrupted; do not resend the work.")
 # A request refused before it reached any socket: nothing is in doubt, so never the copy above.
 NOT_SENT = "Gateway disconnected before the request was sent; nothing was sent."
-# Resume refusals meaning the session itself is gone for this viewer (gateway/session_controls).
-_GONE = frozenset({"not_found", "permission_denied", "profile_mismatch"})
+# ``session.resume`` refusals that mean "this viewer may not open that session": the caller keeps the
+# session it is on instead of adopting the target (startup resume, bare -c fallback).
+RESUME_REFUSALS = frozenset({"not_found", "permission_denied"})
+# Resume refusals meaning the session itself is gone for this viewer (gateway/session_controls): the
+# above plus profile_mismatch, raised for another profile's session (reconnect, /resume switch).
+RESUME_GONE = RESUME_REFUSALS | {"profile_mismatch"}
 # Keyed-resume refusals a plain resume answers as main did: the key does not apply to this session
 # (``rebind_launch_key``: keyless or non-local, another key held, another fingerprint), or the viewer
 # lacks the ``session:control`` a rebind needs but may still read. Any other refusal is the resume's.
@@ -64,7 +68,7 @@ class SessionState:
         self.session_id = session_id
         self.info: dict = {}
         self.title: str | None = None
-        self.todos: list = []
+        self.todo_state: dict | None = None  # the session's {todos, revision}: resume snapshot, then todo.updated
         self.revision = None
         self.subscription_id = None
         self.execution_generation = None
@@ -78,6 +82,24 @@ class SessionState:
         self.request_listeners: list = []
         # A gateway-admitted notification turn the idle CLI queued a header for (gateway_tools_notify).
         self.admitted_turn: dict | None = None
+        # The owner's pending admissions as last published (snapshot or ``session.info``), and the
+        # ``/queue`` inputs this viewer admitted there (``admission_id -> text``), so the turn the owner
+        # runs for one is painted like a typed turn (``gateway_tools_notify.queue_admitted_turn``).
+        self.pending: list = []
+        self.queued_inputs: dict = {}
+        # Started ``/queue`` admissions waiting for their turn (``admission_id -> receipt-like``), and the
+        # one whose item the input loop just took (``gateway_tools_notify.arm_adopted``).
+        self.adopted: dict = {}
+        self.armed_admission: str | None = None
+        # Each pending list the owner published (or a snapshot carried) bumps ``pending_seq``; a
+        # ``/queue`` admission whose ``message.start`` this viewer dropped unpainted (a local turn's
+        # drain or pump) is in ``missed``. Both make the idle tick read its receipt (``recover_queued``).
+        self.pending_seq = 0
+        # ``admission_id -> pending_seq`` when this viewer queued it: the dock shows it only until the
+        # owner publishes a list after that (``gateway_queue.published_queue``).
+        self.queued_at: dict = {}
+        self.recovered_seq = 0
+        self.missed: set = set()
         # ``session.replay_gap``s seen, and how many a re-attach covered: the owner retired this viewer's
         # subscription on overflow, so its frames stop until ``GatewayConnection.reattach``.
         self.gaps = self.attached_gaps = 0
@@ -88,6 +110,12 @@ class SessionState:
         self.subscription_id = snapshot.get("subscription_id", self.subscription_id)
         self.execution_generation = snapshot.get("execution_generation", self.execution_generation)
         self.messages = list(snapshot.get("messages") or [])
+        if "todo_state" in snapshot:  # null clears an earlier plan; a missing key (older gateway) keeps it
+            todo_state = snapshot["todo_state"]
+            self.todo_state = dict(todo_state) if isinstance(todo_state, dict) else None
+        if isinstance(snapshot.get("pending"), list):
+            self.pending = list(snapshot["pending"])
+            self.pending_seq += 1  # a (re)attach replays no frames: the idle tick checks this viewer's /queue rows
         if self.info.get("title"):
             self.title = self.info["title"]
 
@@ -100,10 +128,13 @@ class SessionState:
     def apply_event(self, kind, payload):
         if kind in ("session.info", "session.updated") and isinstance(payload, dict):
             self.info.update({k: v for k, v in payload.items() if k != "session_id"})
+            if isinstance(payload.get("pending"), list):
+                self.pending = list(payload["pending"])
+                self.pending_seq += 1
             if payload.get("title"):
                 self.title = payload["title"]
         elif kind == "todo.updated" and isinstance(payload, dict):
-            self.todos = list(payload.get("todos") or [])
+            self.todo_state = {"todos": list(payload.get("todos") or []), "revision": payload.get("revision")}
         elif kind == "session.usage" and isinstance(payload, dict):
             # The gateway's frame carries the flat counters next to a nested TUI ``usage`` view this
             # reader can't map (``session_usage.usage_frame``): the counters win when present.
@@ -273,7 +304,7 @@ class GatewayConnection:
             try:
                 state.adopt_snapshot(await self._resume(client, session_id))
             except GatewayClientError as exc:
-                if str(exc) not in _GONE:
+                if str(exc) not in RESUME_GONE:
                     raise
                 logger.debug("session.resume %s after reconnect: %s", session_id, exc)
                 state.subscription_id = None
