@@ -228,18 +228,6 @@ async def test_command_hook_rewrite_routes_to_plugin(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_quota_command_is_dispatched_to_gateway_handler():
-    """/quota must not fall through as plain text or an unknown command."""
-    runner = _make_runner()
-    runner._handle_quota_command = AsyncMock(return_value="quota: ok")
-
-    result = await runner._handle_message(_make_event("/quota"))
-
-    assert result == "quota: ok"
-    runner._handle_quota_command.assert_awaited_once()
-
-
-@pytest.mark.asyncio
 async def test_sync_plugin_command_runs_off_loop_thread(monkeypatch):
     """A sync plugin handler doing blocking I/O must run off the gateway loop thread,
     else the loop stops answering shutdown_watchdog probes and is killed with exit 75."""

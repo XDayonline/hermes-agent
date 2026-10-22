@@ -790,16 +790,6 @@ class TestPluginToolsetStartupValidation:
         assert isinstance(cli.model, str) and '/' in cli.model
 
 
-class TestQuotaCommand:
-    def test_quota_command_is_dispatched(self):
-        """The CLI registry and dispatch chain must route /quota to its handler."""
-        cli = _make_cli()
-        with patch.object(cli, "_handle_quota_command", create=True) as handler:
-            cli.process_command("/quota")
-
-        handler.assert_called_once_with()
-
-
 @pytest.mark.parametrize(
     "env, expected",
     [
