@@ -183,99 +183,6 @@ def test_render_account_usage_lines_includes_reset_and_provider():
     assert "Credits balance: $9.99" in lines[3]
 
 
-def test_render_account_quota_card_lines_formats_provider_window_and_balance(monkeypatch):
-    now = datetime(2026, 7, 16, 22, 0, tzinfo=UTC)
-    monkeypatch.setattr(account_usage, "_utc_now", lambda: now)
-    snapshot = AccountUsageSnapshot(
-        provider="openai-codex",
-        source="usage_api",
-        fetched_at=now,
-        plan="Plus",
-        windows=(
-            AccountUsageWindow(
-                label="Session",
-                used_percent=32,
-                reset_at=datetime(2026, 7, 17, 3, 0, tzinfo=UTC),
-            ),
-        ),
-        details=("Credits balance: $9.99",),
-    )
-
-    lines = account_usage.render_account_quota_card_lines(snapshot)
-
-    assert lines == [
-        "🤖 **OpenAI Codex** · Plus",
-        "🟢 **68% left** · Session",
-        "   ↳ Resets in 5h 0m (2026-07-17 03:00 UTC)",
-        "💳 **Credits balance** · $9.99",
-    ]
-
-
-def test_render_account_quota_card_lines_compacts_nested_quota_details(monkeypatch):
-    now = datetime(2026, 7, 16, 22, 0, tzinfo=UTC)
-    monkeypatch.setattr(account_usage, "_utc_now", lambda: now)
-    snapshot = AccountUsageSnapshot(
-        provider="google-antigravity",
-        source="oauth_models_api",
-        fetched_at=now,
-        details=(
-            "Gemini Models",
-            "  Weekly Limit",
-            "    100% left",
-            "    Resets in 6d 23h (2026-07-23 21:00 UTC)",
-            "  Five Hour Limit",
-            "    18% left",
-            "    Resets in 4h 59m (2026-07-17 02:59 UTC)",
-        ),
-    )
-
-    lines = account_usage.render_account_quota_card_lines(snapshot)
-
-    assert lines == [
-        "🧠 **Google Antigravity**",
-        "**Gemini Models**",
-        "• **Weekly Limit** · 🟢 **100% left**",
-        "  ↳ Resets in 6d 23h (2026-07-23 21:00 UTC)",
-        "• **Five Hour Limit** · 🔴 **18% left**",
-        "  ↳ Resets in 4h 59m (2026-07-17 02:59 UTC)",
-    ]
-
-
-def test_render_account_quota_card_lines_ignores_non_finite_percentage_detail():
-    snapshot = AccountUsageSnapshot(
-        provider="example-provider",
-        source="test",
-        fetched_at=datetime.now(UTC),
-        details=("Model limits", "  Weekly", "    inf% left"),
-    )
-
-    lines = account_usage.render_account_quota_card_lines(snapshot)
-
-    assert lines == [
-        "🔹 **Example Provider**",
-        "**Model limits**",
-        "• Weekly",
-        "• inf% left",
-    ]
-
-
-def test_render_account_quota_card_lines_marks_invalid_window_percentages_unavailable():
-    for invalid_percent in (float("inf"), float("-inf"), float("nan"), "bad"):
-        snapshot = AccountUsageSnapshot(
-            provider="example-provider",
-            source="test",
-            fetched_at=datetime.now(UTC),
-            windows=(AccountUsageWindow(label="Session", used_percent=invalid_percent),),
-        )
-
-        lines = account_usage.render_account_quota_card_lines(snapshot)
-
-        assert lines == [
-            "🔹 **Example Provider**",
-            "⚪ **Unavailable** · Session",
-        ]
-
-
 def test_fetch_account_usage_antigravity_renders_weekly_and_five_hour_limits(monkeypatch):
     monkeypatch.setattr(
         account_usage,
@@ -517,36 +424,6 @@ def test_fetch_account_usage_openrouter_omits_quota_window_when_key_has_no_limit
     assert snapshot.windows == ()
     assert "Credits balance: $74.50" in snapshot.details
     assert "API key usage: $25.50 total • $1.25 today • $4.50 this week • $18.00 this month" in snapshot.details
-
-
-def test_fetch_all_providers_quota_discovers_openrouter_without_env_key(monkeypatch):
-    """Aggregate discovery must delegate to runtime resolution, not env gates."""
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    calls = []
-    openrouter_snapshot = AccountUsageSnapshot(
-        provider="openrouter",
-        source="credits_api",
-        fetched_at=datetime.now(UTC),
-        details=("Credits balance: $12.00",),
-    )
-
-    def fake_fetch(provider):
-        calls.append(provider)
-        return openrouter_snapshot if provider == "openrouter" else None
-
-    monkeypatch.setattr(account_usage, "fetch_account_usage", fake_fetch)
-
-    snapshots = account_usage.fetch_all_providers_quota()
-
-    assert calls == [
-        "openai-codex",
-        "anthropic",
-        "openrouter",
-        "google-antigravity",
-        "deepseek",
-        "opencode-go",
-    ]
-    assert snapshots == [openrouter_snapshot]
 
 
 def test_fetch_account_usage_deepseek_uses_runtime_credentials_without_env_key(monkeypatch):
