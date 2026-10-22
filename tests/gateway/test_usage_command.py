@@ -68,35 +68,6 @@ def _make_runner(session_key, agent=None, cached_agent=None):
 SK = "agent:main:telegram:private:12345"
 
 
-class TestQuotaCommand:
-    @pytest.mark.asyncio
-    async def test_quota_command_renders_provider_snapshots(self, monkeypatch):
-        from agent.account_usage import AccountUsageSnapshot
-
-        runner = _make_runner(SK)
-        event = MagicMock()
-        snapshot = AccountUsageSnapshot(
-            provider="google-antigravity",
-            source="oauth_models_api",
-            fetched_at=MagicMock(),
-            details=(
-                "Claude and GPT models",
-                "  Weekly Limit",
-                "    50% left",
-            ),
-        )
-
-        monkeypatch.setattr("gateway.slash_commands_status.fetch_all_providers_quota", lambda: [snapshot])
-
-        result = await runner._handle_quota_command(event)
-
-        assert result.splitlines()[0] == "📊 **Provider Quotas**"
-        assert "🧠 **Google Antigravity**" in result
-        assert "• **Weekly Limit** · 🟢 **50% left**" in result
-        assert "Account limits" not in result
-        assert "Provider:" not in result
-
-
 class TestUsageCachedAgent:
     """The main fix: /usage should find agents in _agent_cache between turns."""
 
@@ -352,30 +323,3 @@ class TestUsageContextBreakdown:
         assert "📊 **Session Token Usage**" in result
         assert "50,000" in result  # total tokens
         assert "Context breakdown" not in result
-
-
-@pytest.mark.asyncio
-async def test_gateway_runner_exposes_quota_handler_from_slash_command_mixin(monkeypatch):
-    """A bare runner must expose the handler through its mixin MRO."""
-    from agent.account_usage import AccountUsageSnapshot
-    from gateway.run import GatewayRunner
-
-    snapshot = AccountUsageSnapshot(
-        provider="openrouter",
-        source="credits_api",
-        fetched_at=None,
-        details=("Credits balance: $12.00",),
-    )
-    monkeypatch.setattr(
-        "gateway.slash_commands_status.fetch_all_providers_quota",
-        lambda: [snapshot],
-        raising=False,
-    )
-    runner = object.__new__(GatewayRunner)
-
-    result = await runner._handle_quota_command(MagicMock())
-
-    assert "Provider Quotas" in result
-    assert "OpenRouter" in result
-    assert "Credits balance" in result
-    assert "$12.00" in result

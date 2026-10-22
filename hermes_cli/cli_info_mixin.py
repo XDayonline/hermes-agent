@@ -613,28 +613,6 @@ class CLIInfoMixin:
 
         _cprint(_tool_progress_label(self.tool_progress_mode))
 
-    def _handle_quota_command(self) -> None:
-        """Render quota and balance snapshots for all configured providers."""
-        from agent.account_usage import fetch_all_providers_quota, render_account_usage_lines
-
-        try:
-            snapshots = fetch_all_providers_quota()
-        except Exception:
-            snapshots = []
-
-        print()
-        if not snapshots:
-            print("  (._.) No quota data is available for configured providers.")
-            return
-
-        print("  📊 Provider Quotas")
-        print(f"  {'─' * 40}")
-        for index, snapshot in enumerate(snapshots):
-            if index:
-                print()
-            for line in render_account_usage_lines(snapshot):
-                print(f"  {line}")
-
     def _handle_usage_command(self, cmd_original: str):
         """Dispatch `/usage [reset [--force]]`: bare `/usage` is the classic display; `reset`
         redeems one banked Codex rate-limit reset credit (refuses unless exhausted or --force)."""

@@ -320,7 +320,6 @@ COMMAND_REGISTRY: list[CommandDef] = [
                gateway_only=True, busy_policy="dispatch", desktop="terminal"),
     CommandDef("usage", "Show token usage and rate limits; `reset` redeems a banked Codex limit reset", "Info",
                args_hint="[reset [--force]]"),
-    CommandDef("quota", "Show quota and balance for configured providers", "Info"),
     CommandDef("subscription", "View your Nous plan and change it in the browser", "Info",
                cli_only=True, aliases=("upgrade",)),
     CommandDef("login", "Sign in with a Nous account (keeps your connectors)", "Info",
