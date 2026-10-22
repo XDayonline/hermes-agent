@@ -1611,12 +1611,6 @@ def _bedrock_catalog(normalized: str, force_refresh: bool) -> Optional[list[str]
         return None
 
 
-def _opencode_free_catalog(normalized: str, force_refresh: bool) -> list[str]:
-    # Live keyless catalog filtered to the anonymous-servable `*-free` tier ourselves; the curated
-    # floor applies only when the live fetch fails/is empty.
-    return _fetch_opencode_free_models(force_refresh=force_refresh) or list(_PROVIDER_MODELS.get(normalized, []))
-
-
 def _azure_foundry_catalog(normalized: str, force_refresh: bool) -> Optional[list[str]]:
     """Live ``GET <base>/models`` of the configured Azure Foundry resource (#27989).
 
@@ -1662,7 +1656,6 @@ _PROVIDER_CATALOG_FETCHERS: dict[str, Any] = {
     "openai-api": _openai_catalog,
     "custom": _custom_catalog,
     "bedrock": _bedrock_catalog,
-    "opencode-free": _opencode_free_catalog,
     # Antigravity's live Code Assist list can lag the tiers exposed by agy. Keep
     # the current curated catalog visible and append account-specific live IDs.
     "google-antigravity": lambda normalized, force_refresh: _merge_unique(
@@ -1671,15 +1664,6 @@ _PROVIDER_CATALOG_FETCHERS: dict[str, Any] = {
     ),
     "azure-foundry": _azure_foundry_catalog,
 }
-
-
-# ``-free`` slugs the relay still LISTS but no longer serves: the Go-only twin (``ox-alpha-free``)
-# and the promo it delisted without removing from ``/models`` (``deepseek-v4-flash-free``). The
-# live-first keyed Zen/Go pickers filter through this so a stale live listing can never route
-# into a 400/403 (#111749).
-_OPENCODE_FREE_EXCLUDED_MODELS = frozenset(
-    {"ox-alpha-free", "deepseek-v4-flash-free", "x-preview-f-free"}
-)
 
 
 def _profile_live_catalog(normalized: str) -> Optional[list[str]]:
@@ -2537,7 +2521,7 @@ def azure_foundry_model_api_mode(model_name: Optional[str]) -> Optional[str]:
     return "codex_responses" if raw and raw.startswith(tuple(_AZURE_FOUNDRY_RESPONSES_PREFIXES)) else None
 
 
-_OPENCODE_FAMILIES = ("opencode-free", "opencode-go", "opencode-zen")
+_OPENCODE_FAMILIES = ("opencode-go", "opencode-zen")
 
 
 def opencode_provider_family(provider_id: Optional[str]) -> Optional[str]:
@@ -2570,101 +2554,6 @@ def normalize_opencode_model_id(provider_id: Optional[str], model_id: Optional[s
     return current
 
 
-# OpenCode Zen free-tier models are served anonymously on the Zen relay. The explicit placeholder
-# is retained for client construction, while the request headers remove Authorization on the wire.
-OPENCODE_ZEN_FREE_KEYLESS_PLACEHOLDER = "opencode-zen-free-keyless"
-_OPENCODE_ZEN_FREE_BASE_URL = "https://opencode.ai/zen/v1"
-_opencode_free_live_memo: Optional[tuple[float, Optional[list[str]]]] = None
-_OPENCODE_FREE_LIVE_MEMO_TTL = 300.0
-
-
-def opencode_zen_free_headers() -> dict:
-    """Headers for anonymous OpenCode Zen free-tier requests."""
-    try:
-        from hermes_cli import __version__ as _v
-    except Exception:
-        _v = "0"
-    return {
-        "Authorization": "",
-        "HTTP-Referer": "https://hermes-agent.nousresearch.com",
-        "X-Title": "Hermes Agent",
-        "User-Agent": f"HermesAgent/{_v}",
-    }
-
-
-def _fetch_opencode_free_models(
-    timeout: float = 8.0, *, force_refresh: bool = False
-) -> Optional[list[str]]:
-    """Fetch the anonymous OpenCode Zen catalog and keep only usable ``*-free`` models."""
-    now = time.time()
-    memo = _opencode_free_live_memo
-    if not force_refresh and memo is not None and now - memo[0] < _OPENCODE_FREE_LIVE_MEMO_TTL:
-        return list(memo[1]) if memo[1] else None
-
-    req = urllib.request.Request(f"{_OPENCODE_ZEN_FREE_BASE_URL.rstrip('/')}/models")
-    req.add_header("Accept", "application/json")
-    for key, value in opencode_zen_free_headers().items():
-        if key.lower() != "authorization":
-            req.add_header(key, value)
-    try:
-        with open_credentialed_url(req, timeout=timeout) as response:
-            data = json.loads(response.read().decode())
-        items = data if isinstance(data, list) else data.get("data", [])
-    except Exception:
-        _set_opencode_free_live_memo(None)
-        return None
-    live_free = [
-        item["id"]
-        for item in items
-        if isinstance(item, dict)
-        and isinstance(item.get("id"), str)
-        and item["id"].lower().endswith("-free")
-        and item["id"].lower() not in _OPENCODE_FREE_EXCLUDED_MODELS
-    ]
-    result = live_free or None
-    _set_opencode_free_live_memo(result)
-    return result
-
-
-def _set_opencode_free_live_memo(ids: Optional[list[str]]) -> None:
-    global _opencode_free_live_memo
-    _opencode_free_live_memo = (time.time(), list(ids) if ids else None)
-
-
-def _opencode_free_known_model_slugs() -> set[str]:
-    """Known keyless free-tier slugs without network I/O."""
-    known = {model.lower() for model in _PROVIDER_MODELS.get("opencode-free", [])}
-    memo = _opencode_free_live_memo
-    if memo is not None and memo[1]:
-        known.update(model.lower() for model in memo[1])
-    try:
-        entry = _load_provider_models_cache().get("opencode-free") or {}
-        known.update(str(model).lower() for model in entry.get("models", []) or [])
-    except Exception:
-        pass
-    return known
-
-
-def opencode_zen_free_runtime(provider_id: Optional[str], model_id: Optional[str]) -> Optional[dict]:
-    """Return a keyless Zen runtime for an OpenCode free-tier model, if applicable."""
-    family = opencode_provider_family(provider_id)
-    if family is None:
-        return None
-    normalized = normalize_opencode_model_id(provider_id, model_id)
-    if family != "opencode-free" and normalized.strip().lower() not in _opencode_free_known_model_slugs():
-        return None
-    api_mode = opencode_model_api_mode("opencode-zen", normalized)
-    base_url = normalize_opencode_base_url("opencode-zen", api_mode, _OPENCODE_ZEN_FREE_BASE_URL)
-    return {
-        "provider": family,
-        "api_mode": api_mode,
-        "base_url": base_url,
-        "api_key": OPENCODE_ZEN_FREE_KEYLESS_PLACEHOLDER,
-        "default_headers": opencode_zen_free_headers(),
-        "source": "opencode-zen-free-keyless",
-    }
-
-
 # Per-family (model-id prefix → api_mode) routing from OpenCode's published Zen/Go endpoint
 # tables, checked in order. GPT/Codex/Grok and Muse Spark use /v1/responses (Muse Spark 503s on
 # chat/completions); Claude, MiniMax (Go), Union Alpha, and Qwen use /v1/messages;
@@ -2681,8 +2570,6 @@ _OPENCODE_API_MODE_PREFIXES: dict[str, tuple[tuple[tuple[str, ...], str], ...]] 
 def opencode_model_api_mode(provider_id: Optional[str], model_id: Optional[str]) -> str:
     """Determine the API mode for an OpenCode Zen / Go model (see ``_OPENCODE_API_MODE_PREFIXES``)."""
     family = opencode_provider_family(provider_id)
-    if family == "opencode-free":
-        family = "opencode-zen"
     normalized = normalize_opencode_model_id(provider_id, model_id).lower()
     if normalized:
         for prefixes, mode in _OPENCODE_API_MODE_PREFIXES.get(family or "", ()):
@@ -2692,7 +2579,7 @@ def opencode_model_api_mode(provider_id: Optional[str], model_id: Optional[str])
 
 
 # Relay path per OpenCode family on opencode.ai hosts.
-_OPENCODE_FAMILY_PATHS = {"opencode-free": "/zen", "opencode-zen": "/zen", "opencode-go": "/zen/go"}
+_OPENCODE_FAMILY_PATHS = {"opencode-zen": "/zen", "opencode-go": "/zen/go"}
 
 
 def normalize_opencode_base_url(
