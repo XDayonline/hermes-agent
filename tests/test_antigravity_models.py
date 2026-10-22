@@ -8,22 +8,33 @@ from hermes_cli.models import _PROVIDER_MODELS
 def test_antigravity_catalog_exposes_user_visible_tiers():
     models = _PROVIDER_MODELS["google-antigravity"]
 
-    # Real upstream IDs as exposed by the Antigravity API (no renaming)
-    assert "gemini-3.5-flash-extra-low" in models   # Flash Low
-    assert "gemini-3.5-flash-low" in models          # Flash Medium
-    assert "gemini-3-flash-agent" in models           # Flash High
-    assert "gemini-3.1-pro-low" in models             # Pro Low
-    assert "gemini-pro-agent" in models               # Pro High
+    # Current Agy tiers, exactly as `agy models` reports them.
+    assert "gemini-4-argon-high" in models
+    assert "gemini-4-argon-medium" in models
+    assert "gemini-4-argon-low" in models
+    assert "gemini-3.8-flash-high" in models
+    assert "gemini-3.8-flash-medium" in models
+    assert "gemini-3.8-flash-low" in models
 
-    # Synthetic renamed Flash IDs we previously invented must NOT appear.
-    assert "gemini-3.5-flash-medium" not in models
-    assert "gemini-3.5-flash-high" not in models
+    # Superseded flash tiers must not clutter the picker; live discovery can still
+    # re-add them for accounts that expose them.
+    for retired in (
+        "gemini-3.7-flash-high", "gemini-3.7-flash-medium", "gemini-3.7-flash-low",
+        "gemini-3.6-flash-high", "gemini-3.6-flash-medium", "gemini-3.6-flash-low",
+        "gemini-3.5-flash-low", "gemini-3.5-flash-extra-low",
+        "gemini-3-flash-agent", "gemini-pro-agent", "gemini-3.1-pro-high",
+    ):
+        assert retired not in models
 
-    # Keep the legacy Pro high alias available for backward compatibility.
-    assert "gemini-3.1-pro-high" in models
+
+def test_antigravity_argon_tiers_pass_through():
+    # Tier ids encode the thinking level; the upstream wire id is identical.
+    for tier in ("gemini-4-argon-high", "gemini-4-argon-medium", "gemini-4-argon-low"):
+        assert _resolve_antigravity_model_id(tier) == tier
 
 
 def test_antigravity_flash_tiers_route_to_upstream_ids():
+    # Legacy aliases stay available for configs pinned before the tier rename.
     assert _resolve_antigravity_model_id("gemini-3.5-flash-low") == "gemini-3.5-flash-extra-low"
     assert _resolve_antigravity_model_id("gemini-3.5-flash-medium") == "gemini-3.5-flash-low"
     assert _resolve_antigravity_model_id("gemini-3.5-flash-high") == "gemini-3-flash-agent"

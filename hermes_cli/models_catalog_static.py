@@ -195,13 +195,14 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "gemini-3.1-pro-preview", "gemini-3-pro-preview", "gemini-3.6-flash", "gemini-3.1-flash-lite-preview",
     ],
     "google-antigravity": [
+        "gemini-4-argon-high", "gemini-4-argon-medium", "gemini-4-argon-low",
         "gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low",
-        "gemini-3.7-flash-high", "gemini-3.7-flash-medium", "gemini-3.7-flash-low",
-        "gemini-3.6-flash-high", "gemini-3.6-flash-medium", "gemini-3.6-flash-low",
-        "gemini-3.1-pro-high", "gemini-3.1-pro-low",
-        "claude-sonnet-4-6", "claude-opus-4-6-thinking", "gpt-oss-120b-medium",
-        # Retain legacy routes for accounts that still expose them through live discovery.
-        "gemini-3.5-flash-extra-low", "gemini-3.5-flash-low", "gemini-3-flash-agent", "gemini-pro-agent",
+        "claude-opus-5-5-high", "claude-opus-5-5-medium", "claude-opus-5-5-low",
+        "claude-sonnet-5-5-high", "claude-sonnet-5-5-medium", "claude-sonnet-5-5-low",
+        "gpt-oss-120b-medium",
+        # Anything older (flash 3.7/3.6/3.5, 3.1 pro) stays reachable only when the
+        # account's live Code Assist list still exposes it; dispatch aliases in
+        # agent/gemini_cloudcode_adapter.py keep pinned configs working.
     ],
     "zai": [
         "glm-5.3", "glm-5.3-flash", "glm-5.2", "glm-5.1", "glm-5", "glm-5v-turbo", "glm-5-turbo",

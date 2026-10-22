@@ -870,7 +870,9 @@ def get_model_capabilities(
         caps = ModelCapabilities(
             supports_tools=True,
             supports_vision=False,
-            supports_reasoning="pro" in model or "opus" in model or "sonnet" in model,
+            supports_reasoning=(
+                "pro" in model or "opus" in model or "sonnet" in model or "argon" in model
+            ),
             context_window=1000000 if "gemini" in model else 200000,
             max_output_tokens=8192,
         )
