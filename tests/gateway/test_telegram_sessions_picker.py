@@ -11,9 +11,11 @@ These tests use a fake ``telegram`` module so we don't pull in the real
 for the same approach.
 """
 
+import sqlite3
 import sys
 import time
 import types
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
@@ -492,6 +494,17 @@ class _FakeSessionDB:
             "s1": {"id": "s1", "title": "Old session"},
             "s2": {"id": "s2", "title": "Another session"},
         }
+        # Upstream's handoff_head() reads sessions/state_meta through _read_ctx();
+        # an empty in-memory DB is enough: no local receipt, no compression lineage.
+        self._conn = sqlite3.connect(":memory:", check_same_thread=False)
+        self._conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, chat_id TEXT)")
+        self._conn.execute("CREATE TABLE state_meta (key TEXT PRIMARY KEY, value TEXT)")
+
+    def _read_ctx(self):
+        return nullcontext(self._conn)
+
+    def get_compression_tip(self, sid):
+        return sid
 
     async def get_session(self, sid):
         return self.sessions.get(sid)
