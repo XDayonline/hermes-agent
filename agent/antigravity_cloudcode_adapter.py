@@ -29,6 +29,29 @@ from agent.gemini_cloudcode_adapter import (
 MARKER_BASE_URL = "antigravity-pa://google"
 
 
+def _dump_rejected_payload(status: int, wrapped: Dict[str, Any]) -> None:
+    """Persist the exact Code Assist payload Google rejected (debug aid)."""
+    try:
+        import json as _json
+        import os as _os
+        import pathlib as _pathlib
+        import time as _time
+
+        path = _pathlib.Path(
+            _os.environ.get("HERMES_AGY_DUMP", "/home/gsc/.hermes/logs/agy-reject.json")
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            _json.dumps(
+                {"status": status, "ts": _time.time(), "wrapped": wrapped},
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
 class AntigravityCloudCodeClient(GeminiCloudCodeClient):
     """Minimal OpenAI-SDK-compatible facade over Antigravity Code Assist."""
 
@@ -127,6 +150,7 @@ class AntigravityCloudCodeClient(GeminiCloudCodeClient):
         url = f"{ANTIGRAVITY_CODE_ASSIST_ENDPOINT}/v1internal:generateContent"
         response = self._http.post(url, json=wrapped, headers=headers)
         if response.status_code != 200:
+            _dump_rejected_payload(response.status_code, wrapped)
             raise _gemini_http_error(response)
         try:
             payload = response.json()
@@ -153,6 +177,7 @@ class AntigravityCloudCodeClient(GeminiCloudCodeClient):
                 with self._http.stream("POST", url, json=wrapped, headers=stream_headers) as response:
                     if response.status_code != 200:
                         response.read()
+                        _dump_rejected_payload(response.status_code, wrapped)
                         raise _gemini_http_error(response)
                     tool_call_counter: List[int] = [0]
                     for event in _iter_sse_events(response):

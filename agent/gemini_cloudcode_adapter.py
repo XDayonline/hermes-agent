@@ -108,15 +108,24 @@ def _translate_tool_call_to_gemini(tool_call: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _translate_tool_result_to_gemini(message: Dict[str, Any]) -> Dict[str, Any]:
+def _translate_tool_result_to_gemini(
+    message: Dict[str, Any],
+    *,
+    resolved_name: Optional[str] = None,
+) -> Dict[str, Any]:
     """OpenAI tool-role message -> Gemini functionResponse part.
 
-    The function name isn't in the OpenAI tool message directly; it must be
-    passed via the assistant message that issued the call. For simplicity we
-    look up ``name`` on the message (OpenAI SDK copies it there) or on the
-    ``tool_call_id`` cross-reference.
+    Gemini matches a response to its call by *function name*, while the OpenAI
+    tool message only carries ``tool_call_id``. The caller must pass the name of
+    the assistant's ``functionCall`` via ``resolved_name``; emitting the raw call
+    id makes Code Assist answer ``400 INVALID_ARGUMENT``.
     """
-    name = str(message.get("name") or message.get("tool_call_id") or "tool")
+    name = str(
+        resolved_name
+        or message.get("name")
+        or message.get("tool_call_id")
+        or "tool"
+    )
     content = _coerce_content_to_text(message.get("content"))
     # Gemini expects the response as a dict under `response`. We wrap plain
     # text in {"output": "..."}.
@@ -140,6 +149,7 @@ def _build_gemini_contents(
     """Convert OpenAI messages[] to Gemini contents[] + systemInstruction."""
     system_text_parts: List[str] = []
     contents: List[Dict[str, Any]] = []
+    call_names: Dict[str, str] = {}
 
     for msg in messages:
         if not isinstance(msg, dict):
@@ -152,9 +162,12 @@ def _build_gemini_contents(
 
         # Tool result message — emit a user-role turn with functionResponse
         if role == "tool" or role == "function":
+            call_id = str(msg.get("tool_call_id") or "")
             contents.append({
                 "role": "user",
-                "parts": [_translate_tool_result_to_gemini(msg)],
+                "parts": [_translate_tool_result_to_gemini(
+                    msg, resolved_name=call_names.get(call_id)
+                )],
             })
             continue
 
@@ -170,6 +183,11 @@ def _build_gemini_contents(
         if isinstance(tool_calls, list):
             for tc in tool_calls:
                 if isinstance(tc, dict):
+                    tc_fn = tc.get("function")
+                    tc_name = str(tc_fn.get("name") or "") if isinstance(tc_fn, dict) else ""
+                    tc_id = str(tc.get("id") or "")
+                    if tc_id and tc_name:
+                        call_names[tc_id] = tc_name
                     parts.append(_translate_tool_call_to_gemini(tc))
 
         if not parts:
@@ -635,7 +653,10 @@ class GeminiCloudCodeClient:
         self._project_context_lock = False  # simple single-thread guard
         self.chat = _GeminiChatNamespace(self)
         self.is_closed = False
-        self._http = httpx.Client(timeout=httpx.Timeout(connect=15.0, read=600.0, write=30.0, pool=30.0))
+        self._http = httpx.Client(
+            timeout=httpx.Timeout(connect=15.0, read=600.0, write=30.0, pool=30.0),
+            transport=httpx.HTTPTransport(local_address="0.0.0.0"),
+        )
 
     def close(self) -> None:
         self.is_closed = True

@@ -417,3 +417,37 @@ class TestAntigravityRegistration:
         from hermes_cli.auth_commands import _OAUTH_CAPABLE_PROVIDERS
 
         assert "google-antigravity" in _OAUTH_CAPABLE_PROVIDERS
+
+
+class TestGeminiContentsTranslation:
+    def test_tool_result_uses_function_name_not_call_id(self):
+        from agent.gemini_cloudcode_adapter import build_gemini_request
+
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "go"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_abc",
+                        "type": "function",
+                        "function": {"name": "terminal", "arguments": json.dumps({"command": "ls"})},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_abc", "content": json.dumps({"output": "ok"})},
+            {"role": "user", "content": "next"},
+        ]
+
+        body = build_gemini_request(messages=messages)
+        responses = [
+            part["functionResponse"]
+            for content in body["contents"]
+            for part in content["parts"]
+            if "functionResponse" in part
+        ]
+
+        assert responses, "tool result must produce a functionResponse part"
+        assert responses[0]["name"] == "terminal"

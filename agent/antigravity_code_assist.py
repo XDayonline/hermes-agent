@@ -35,7 +35,7 @@ ANTIGRAVITY_CLIENT_METADATA = {
     "platform": "PLATFORM_UNSPECIFIED",
     "pluginType": "GEMINI",
 }
-ANTIGRAVITY_USER_AGENT = "antigravity/1.0.0 windows/amd64"
+ANTIGRAVITY_USER_AGENT = "antigravity/cli/1.4.12 windows/amd64"
 ANTIGRAVITY_X_GOOG_API_CLIENT = "google-cloud-sdk vscode_cloudshelleditor/0.1"
 
 DEFAULT_AGENT_MODEL_IDS = [
