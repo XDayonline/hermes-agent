@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, Iterator, List, Optional
 
 import httpx
@@ -26,10 +27,64 @@ from agent.gemini_cloudcode_adapter import (
     wrap_code_assist_request,
 )
 
+logger = logging.getLogger(__name__)
+
 MARKER_BASE_URL = "antigravity-pa://google"
 
+# JSON-Schema combinators Anthropic rejects anywhere inside ``input_schema`` when a Claude tier
+# is served through Code Assist.
+_COMBINATOR_KEYS = ("anyOf", "oneOf", "allOf")
 
-def _dump_rejected_payload(status: int, wrapped: Dict[str, Any]) -> None:
+
+def _collapse_schema_combinators(node: Any) -> Any:
+    """Replace every remaining union/combinator node by a permissive shell.
+
+    Claude through Code Assist 400s the whole turn with "JSON schema is invalid. It must match
+    JSON Schema draft 2020-12" when ``input_schema`` still contains ``anyOf``/``oneOf``/``allOf``
+    at ANY depth; the provider then falls back, so the user's chosen tier silently runs on another
+    model. ``tools.schema_sanitizer`` only collapses *nullable* unions and strips combinators at
+    the top level, so a genuine union (``boolean | array``, per-action operation shapes) survives.
+
+    The shell keeps the human description — handlers validate their own arguments — and the input
+    is never mutated, so callers holding the original tool list are unaffected.
+    """
+    if isinstance(node, list):
+        return [_collapse_schema_combinators(item) for item in node]
+    if not isinstance(node, dict):
+        return node
+    out = {key: _collapse_schema_combinators(value) for key, value in node.items()}
+    if any(key in out for key in _COMBINATOR_KEYS):
+        description = out.get("description") or out.get("title")
+        return {"description": description} if isinstance(description, str) and description else {}
+    return out
+
+
+def _prepare_tools_for_claude(tools: Any, wire_model: str) -> Any:
+    """Collapse schema combinators for Claude tiers only; other families keep their unions."""
+    if not isinstance(tools, list) or not tools:
+        return tools
+    if not str(wire_model or "").lower().startswith("claude"):
+        return tools
+    prepared: list[Any] = []
+    collapsed: list[str] = []
+    for tool in tools:
+        fn = tool.get("function") if isinstance(tool, dict) else None
+        if not isinstance(fn, dict) or not isinstance(fn.get("parameters"), dict):
+            prepared.append(tool)
+            continue
+        parameters = _collapse_schema_combinators(fn["parameters"])
+        if parameters != fn["parameters"]:
+            collapsed.append(str(fn.get("name", "<tool>")))
+        prepared.append({**tool, "function": {**fn, "parameters": parameters}})
+    if collapsed:
+        logger.debug(
+            "antigravity: collapsed JSON-Schema unions for Claude tier in %s (they 400 "
+            "input_schema validation)", ", ".join(collapsed),
+        )
+    return prepared
+
+
+def _dump_rejected_payload(status: int, wrapped: dict[str, Any]) -> None:
     """Persist the exact Code Assist payload Google rejected (debug aid)."""
     try:
         import json as _json
@@ -60,7 +115,7 @@ class AntigravityCloudCodeClient(GeminiCloudCodeClient):
         *,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
-        default_headers: Optional[Dict[str, str]] = None,
+        default_headers: Optional[dict[str, str]] = None,
         project_id: str = "",
         **kwargs: Any,
     ):
@@ -104,7 +159,7 @@ class AntigravityCloudCodeClient(GeminiCloudCodeClient):
         self,
         *,
         model: str = "gemini-3-flash-agent",
-        messages: Optional[List[Dict[str, Any]]] = None,
+        messages: Optional[list[dict[str, Any]]] = None,
         stream: bool = False,
         tools: Any = None,
         tool_choice: Any = None,
@@ -112,13 +167,16 @@ class AntigravityCloudCodeClient(GeminiCloudCodeClient):
         max_tokens: Optional[int] = None,
         top_p: Optional[float] = None,
         stop: Any = None,
-        extra_body: Optional[Dict[str, Any]] = None,
+        extra_body: Optional[dict[str, Any]] = None,
         timeout: Any = None,
         **_: Any,
     ) -> Any:
         access_token = antigravity_oauth.get_valid_access_token()
         requested_model = model
         wire_model = _resolve_antigravity_model_id(model)
+        # Claude tiers served through Code Assist reject any nested JSON-Schema combinator in
+        # ``input_schema``; collapse them before the payload is built.
+        tools = _prepare_tools_for_claude(tools, wire_model)
         ctx = self._ensure_project_context(access_token, wire_model)
 
         thinking_config = None
@@ -165,8 +223,8 @@ class AntigravityCloudCodeClient(GeminiCloudCodeClient):
         self,
         *,
         model: str,
-        wrapped: Dict[str, Any],
-        headers: Dict[str, str],
+        wrapped: dict[str, Any],
+        headers: dict[str, str],
     ) -> Iterator[_GeminiStreamChunk]:
         url = f"{ANTIGRAVITY_CODE_ASSIST_ENDPOINT}/v1internal:streamGenerateContent?alt=sse"
         stream_headers = dict(headers)
@@ -179,10 +237,9 @@ class AntigravityCloudCodeClient(GeminiCloudCodeClient):
                         response.read()
                         _dump_rejected_payload(response.status_code, wrapped)
                         raise _gemini_http_error(response)
-                    tool_call_counter: List[int] = [0]
+                    tool_call_counter: list[int] = [0]
                     for event in _iter_sse_events(response):
-                        for chunk in _translate_stream_event(event, model, tool_call_counter):
-                            yield chunk
+                        yield from _translate_stream_event(event, model, tool_call_counter)
             except httpx.HTTPError as exc:
                 raise CodeAssistError(
                     f"Antigravity streaming request failed: {exc}",
